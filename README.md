@@ -1,13 +1,14 @@
 # CMRD: Confidence-Modulation Reference Deviation Representation for Target-Free Cross-Subject EEG Emotion Recognition
 
 Official implementation of **CMRD** for target-free cross-subject EEG emotion recognition on **SEED** and **SEED-IV**.
-The main Code will release upon AC... Or we are required.
 
 ## Overview
 
 This repository contains:
 
 - a unified training script for SEED and SEED-IV;
+- a SEED RJSD/JSD preprocessing pipeline from raw `.mat` files to `_fold_jsd/`;
+- a SEED DE preprocessing pipeline from raw `.mat` files to `_fold_de/`;
 - a SEED feature-fusion utility for combining existing JSD and DE folds;
 - a SEED-IV end-to-end preprocessing pipeline from raw `.mat` files to LOOCV folds.
 
@@ -23,6 +24,8 @@ The current public version focuses on reproducibility and release readiness:
 ```text
 .
 ├── Preprocess/
+│   ├── Pre-DE-SEED.py
+│   ├── Pre-RJSD-SEED.py
 │   ├── Pre-SEED.py
 │   └── Pre-SEED-IV.py
 ├── Train/
@@ -54,6 +57,45 @@ The datasets are **not** redistributed in this repository. Please obtain SEED an
 
 ### SEED
 
+SEED preprocessing is organized into three stages:
+
+1. Build RJSD/JSD folds from raw preprocessed EEG.
+2. Build DE folds from the same raw preprocessed EEG.
+3. Fuse `_fold_jsd` and `_fold_de` into the final gated features used for training.
+
+#### Step 1: RJSD/JSD folds
+
+```bash
+python Preprocess/Pre-RJSD-SEED.py \
+  --base-path /path/to/SEED \
+  --save-root data/SEED \
+  --steps 1 2 3
+```
+
+This produces:
+
+- `data/SEED/_p_hist/`
+- `data/SEED/_ref_cache/`
+- `data/SEED/_fold_jsd/`
+
+#### Step 2: DE folds
+
+```bash
+python Preprocess/Pre-DE-SEED.py \
+  --base-path /path/to/SEED \
+  --save-root data/SEED \
+  --steps 1 2
+```
+
+This produces:
+
+- `data/SEED/_de/`
+- `data/SEED/_fold_de/`
+
+`--fold-link-mode copy|symlink|hardlink` controls how files are materialized in `_fold_de/`.
+
+#### Step 3: gated fusion
+
 `Preprocess/Pre-SEED.py` expects that you already have matching LOOCV fold directories for:
 
 - JSD features;
@@ -77,9 +119,15 @@ Run:
 
 ```bash
 python Preprocess/Pre-SEED.py \
-  --jsd_root /path/to/seed/_fold_jsd \
-  --de_root /path/to/seed/_fold_de \
+  --jsd_root data/SEED/_fold_jsd \
+  --de_root data/SEED/_fold_de \
   --save_root data/SEED/_fold_jsd_degate
+```
+
+The final SEED training-ready folds will be written to:
+
+```text
+data/SEED/_fold_jsd_degate/
 ```
 
 ### SEED-IV
