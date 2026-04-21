@@ -1,6 +1,7 @@
 # CMRD: Confidence-Modulation Reference Deviation Representation for Target-Free Cross-Subject EEG Emotion Recognition
 
 Official implementation of **CMRD** for target-free cross-subject EEG emotion recognition on **SEED** and **SEED-IV**.
+The main Code will release upon AC... Or we are required.
 
 ## Overview
 
