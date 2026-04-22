@@ -191,10 +191,3 @@ Each training run writes:
 - `fold_sidXX/model_final.pth`;
 - `overall_metrics.json`.
 
-## Release Notes
-
-Before making the repository public, you may still want to add:
-
-- a project `LICENSE`;
-- a paper citation entry (`CITATION.cff` or BibTeX);
-- a short changelog or release tag for the exact paper version.
