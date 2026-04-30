@@ -17,7 +17,6 @@ The current public version focuses on reproducibility and release readiness:
 - local absolute paths have been removed from defaults;
 - training and preprocessing now use explicit command-line interfaces;
 - outputs are written to predictable repo-relative directories;
-- the best fold checkpoint is restored before final evaluation.
 
 ## Repository Structure
 
