@@ -32,7 +32,7 @@ SAVE_ROOT = "data/SEED"
 CHANNEL_XLSX = os.path.join(BASE_PATH, "channel-order.xlsx")
 LABEL_PATH = os.path.join(RAW_DATA, "label.mat")
 
-# 频带
+# Frequency bands
 BANDS = {
     "delta": (1, 4),
     "theta": (4, 8),
@@ -42,28 +42,28 @@ BANDS = {
 }
 BAND_NAMES = list(BANDS.keys())
 
-# 采样与滑窗
+# Sampling and sliding windows
 SFREQ      = 200.0
 WINDOW_SEC = 4.0
 STRIDE_SEC = 1.0
 
-# Welch 与直方图
+# Welch and histogram settings
 WELCH_NPERSEG       = int(SFREQ * 2)   # 2s
 WELCH_NOVERLAP      = int(SFREQ * 1)   # 1s
 HIST_BINS_PER_BAND  = 32
 EPS                 = 1e-12
 
-# 通道数（SEED 为 62）
+# Channel count: SEED has 62 channels.
 N_CHANNELS = 62
 
-# 目录角色
+# Directory roles
 PHIST_DIR = '_p_hist'
 CACHE_DIR = '_ref_cache'
 FOLD_DIR  = '_fold_jsd'
 
 
 # =========================
-# 工具函数
+# Utility functions
 # =========================
 
 def _safe_mkdir(p):
@@ -72,9 +72,9 @@ def _safe_mkdir(p):
 
 def natural_key(name: str):
     """
-    自然排序 key：
+    Natural sort key:
     - 'ww_eeg1','ww_eeg2',...,'ww_eeg9','ww_eeg10','ww_eeg11',...,'ww_eeg15'
-    - 避免 Python 默认字符串排序导致 'ww_eeg10' < 'ww_eeg2'
+    - Avoid Python's default string sort placing 'ww_eeg10' before 'ww_eeg2'.
     """
     m = re.search(r"(\d+)", name)
     return int(m.group(1)) if m else name
@@ -82,10 +82,10 @@ def natural_key(name: str):
 
 def discover_subject_files(raw_data_path):
     """
-    返回 [[subj1_文件们], [subj2_文件们], ...]（按 subject_id 升序），
-    文件基名来自 Preprocessed_EEG 下的 *.mat（排除 label.mat）
+    Return [[subj1_files], [subj2_files], ...], ordered by subject_id.
+    Basenames come from *.mat files under Preprocessed_EEG, excluding label.mat.
 
-    例如：
+    Example:
         [["1_20131027","1_20131030","1_20131107"],
          ["2_20140404","2_20140413",...],
          ...]
@@ -111,7 +111,7 @@ def discover_subject_files(raw_data_path):
 def create_clips(data, clip_len, stride):
     """
     data: (C, T)
-    返回列表 [(clip, start_idx, end_idx), ...]
+    Return list [(clip, start_idx, end_idx), ...].
     """
     clips = []
     n = data.shape[1]
@@ -124,7 +124,7 @@ def create_clips(data, clip_len, stride):
 def compute_psd(clip, fs):
     """
     clip: (C, L)
-    返回 freqs: (F,), psd: (C, F)
+    Return freqs: (F,), psd: (C, F).
     """
     freqs, psd = welch(
         clip,
@@ -138,14 +138,14 @@ def compute_psd(clip, fs):
 
 def band_histogram(freqs, band, psd_row, bins_per_band=HIST_BINS_PER_BAND):
     """
-    对单个通道 psd_row 在某个频带内做频率直方图（权重为功率）
+    Build a frequency histogram for one channel's psd_row within a band, weighted by power.
     """
     low, high = band
     mask = (freqs >= low) & (freqs < high)
     bins = np.linspace(low, high, bins_per_band + 1)
 
     if not np.any(mask):
-        # 没有频点落入频带，给均匀分布
+        # If no frequency points fall in the band, use a uniform distribution.
         return np.full((bins_per_band,), 1.0 / bins_per_band, dtype=np.float32), bins.astype(np.float32)
 
     fband = freqs[mask]
@@ -163,8 +163,9 @@ def band_histogram(freqs, band, psd_row, bins_per_band=HIST_BINS_PER_BAND):
 
 def quality_components(freqs, psd, clip, frontal_idx):
     """
-    基于线噪声比例 / 肌电比例 / 与额叶参考的相关系数构造简单质量分数。
-    返回 quality: (C, B)
+    Build a simple quality score from line-noise ratio, muscle ratio,
+    and correlation with the frontal reference.
+    Return quality: (C, B).
     """
     C = psd.shape[0]
     B = len(BANDS)
@@ -178,7 +179,7 @@ def quality_components(freqs, psd, clip, frontal_idx):
     else:
         ref = clip.mean(axis=0)
 
-    # EOG 相关（简单 Pearson）
+    # EOG correlation, using simple Pearson correlation.
     for c in range(C):
         x = clip[c, :]
         if np.std(x) > 1e-8 and np.std(ref) > 1e-8:
@@ -186,20 +187,20 @@ def quality_components(freqs, psd, clip, frontal_idx):
         else:
             eog_corr[c, :] = 0.0
 
-    # 线噪 / 肌电比例
+    # Line-noise and muscle ratios.
     for b_idx, (_, (low, high)) in enumerate(BANDS.items()):
         mask_b = (freqs >= low) & (freqs < high)
         denom = psd[:, mask_b].sum(axis=1) + 1e-12
 
-        # 49–51 Hz 线噪（和带交集）
+        # 49-51 Hz line noise, intersected with the current band.
         mask_ln = (freqs >= max(49.0, low)) & (freqs < min(51.0, high))
         line_noise[:, b_idx] = (psd[:, mask_ln].sum(axis=1) / denom).astype(np.float32)
 
-        # 45–60 Hz 肌电（和带交集）
+        # 45-60 Hz muscle activity, intersected with the current band.
         mask_emg = (freqs >= max(45.0, low)) & (freqs < min(60.0, high))
         muscle[:, b_idx] = (psd[:, mask_emg].sum(axis=1) / denom).astype(np.float32)
 
-    # 简单组合：bad ∈ [0,1] → quality = 1-bad
+    # Simple combination: bad in [0,1], quality = 1 - bad.
     bad = (np.clip(line_noise, 0, 1) +
            np.clip(muscle,     0, 1) +
            np.clip(eog_corr,   0, 1)) / 3.0
@@ -209,9 +210,9 @@ def quality_components(freqs, psd, clip, frontal_idx):
 
 def jsd_from_phist(p_hist, Q):
     """
-    p_hist: (T, C, B, F)，每个时间窗的直方图
-    Q     : (C, B, F)，参考分布
-    返回 JSD: (T, C, B)
+    p_hist: (T, C, B, F), histogram for each time window.
+    Q     : (C, B, F), reference distribution.
+    Return JSD: (T, C, B).
     """
     P = p_hist.astype(np.float32)
     P = np.clip(P, EPS, None)
@@ -223,22 +224,23 @@ def jsd_from_phist(p_hist, Q):
     M = 0.5 * (P + Qn[None, ...])  # (T,C,B,F)
 
     kl_PM = (P   * (np.log(P)   - np.log(M))).sum(axis=-1)
-    kl_QM = (Qn  * (np.log(Qn)  - np.log(M))).sum(axis=-1)   # 广播到 T
+    kl_QM = (Qn  * (np.log(Qn)  - np.log(M))).sum(axis=-1)   # Broadcast to T.
 
     jsd = 0.5 * kl_PM + 0.5 * kl_QM
     return jsd.astype(np.float32)
 
 
 # =========================
-# Step 0：加载通道 / 蒙太奇 / 标签
+# Step 0: Load channels / montage / labels.
 # =========================
 
 def load_channel_info_and_labels(channel_xlsx, label_path):
     """
-    仅加载：
-      - 通道顺序（用于 metadata 与 quality 的额叶索引）
-      - label.mat 标签向量（长度通常为 15）
-    注意：不再创建 MNE info / montage，因为 .mat 已经做过 ICA 等预处理，我们不重复预处理。
+    Load only:
+      - channel order, used for metadata and frontal indices in quality
+      - label.mat label vector, usually length 15
+    Note: do not create MNE info / montage because the .mat files have already
+    gone through ICA and other preprocessing, so preprocessing is not repeated here.
     """
     channel_order = pd.read_excel(channel_xlsx, header=None)
 
@@ -249,13 +251,13 @@ def load_channel_info_and_labels(channel_xlsx, label_path):
     if len(ch_names_eeg) != N_CHANNELS:
         print(f"[WARN] Excel 列出 {len(ch_names_eeg)} 通道，期望 {N_CHANNELS}")
 
-    # 额叶通道（用于简易 EOG 参考的 quality 组件；若缺失则退化为前两个通道）
+    # Frontal channels for the simple EOG-reference quality component; fall back to the first two channels if missing.
     frontal_channel_names = ['FP1', 'FP2'] if all(
         x in ch_names_eeg for x in ['FP1', 'FP2']
     ) else ch_names_eeg[:2]
     frontal_idx = [i for i, n in enumerate(ch_names_eeg) if n in frontal_channel_names]
 
-    # --- 标签 ---
+    # --- Labels ---
     labels_mat = scipy.io.loadmat(label_path)
     lab = None
     for k in ['label', 'labels', 'Label', 'Labels']:
@@ -274,11 +276,11 @@ def load_channel_info_and_labels(channel_xlsx, label_path):
 
 def build_phist_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
     """
-    对所有 subject 的所有 session：
-    - 读取 *.mat
-    - 对每个 trial (ww_eeg1..ww_eeg15) 做自然排序
-    - 为每个 trial 生成滑窗 p_hist / quality / label
-    - 存到 SAVE_ROOT/_p_hist/subj_xx/round_y/ 下
+    For all sessions of all subjects:
+    - Read *.mat files.
+    - Natural-sort each trial (ww_eeg1..ww_eeg15).
+    - Generate sliding-window p_hist / quality / label for each trial.
+    - Save under SAVE_ROOT/_p_hist/subj_xx/round_y/.
     """
 
     out_root = os.path.join(save_root, PHIST_DIR)
@@ -311,7 +313,7 @@ def build_phist_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
             mat = scipy.io.loadmat(mat_path)
             trial_keys = [k for k in mat.keys() if not k.startswith('__')]
 
-            # ✨ 关键修正：trial 使用“自然排序”，保证 ww_eeg1..15 顺序对应 label[0..14]
+            # Key fix: natural-sort trials so ww_eeg1..15 matches label[0..14].
             trial_keys = sorted(trial_keys, key=natural_key)
 
             if len(trial_keys) != len(labels_vec):
@@ -324,7 +326,7 @@ def build_phist_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
                 else:
                     lab_val = int(labels_vec[trial_idx])
 
-                raw_np = mat[key]  # (C, T) 或 (T, C)
+                raw_np = mat[key]  # (C, T) or (T, C)
                 if raw_np.shape[0] != N_CHANNELS:
                     raw_np = raw_np.T
                 if raw_np.shape[0] != N_CHANNELS:
@@ -334,11 +336,11 @@ def build_phist_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
                 subject_name = f's{subject_index:02d}'
                 save_path = os.path.join(round_dir, f'{subject_name}_eeg{trial_idx+1}.npz')
 
-                # 断点续跑：如果已经存在则跳过
+                # Resume support: skip existing outputs.
                 if os.path.exists(save_path):
                     continue
 
-                # ✅ .mat 已完成 ICA/滤波等预处理：这里不重复任何预处理
+                # The .mat files have already gone through ICA/filtering, so do not repeat preprocessing here.
                 data = raw_np.astype(np.float32)  # (C, T)
                 if not np.isfinite(data).all():
                     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -383,7 +385,7 @@ def build_phist_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
 
 
 # ======================================
-# Step 2：汇总 per-subject / global 累积
+# Step 2: Aggregate per-subject and global accumulators.
 # ======================================
 
 def build_accum_all(save_root):
@@ -423,12 +425,12 @@ def build_accum_all(save_root):
 
 
 # ===========================================
-# Step 3：为所有 LOOCV 折生成 JSD 特征
+# Step 3: Generate JSD features for all LOOCV folds.
 # ===========================================
 
 def make_ref_excluding(cache_root, target_sid_tag):
     """
-    global_accum - target_subject_accum → 归一化 → (C,B,F) 作为参考分布 Q
+    global_accum - target_subject_accum, then normalize to (C,B,F) as reference distribution Q.
     """
     g = np.load(f"{cache_root}/accum_global.npz")["accum"].astype(np.float64)
     a = np.load(f"{cache_root}/accum_{target_sid_tag}.npz")["accum"].astype(np.float64)
@@ -448,7 +450,7 @@ def write_fold_trial(in_path, out_path, Q):
     p_hist  = d["p_hist"]
     quality = d["quality"]
 
-    # 保留其余 meta 信息
+    # Preserve the remaining meta information.
     def sanitize(x):
         arr = np.array(x)
         if arr.dtype == object:
@@ -474,7 +476,7 @@ def build_all_folds(save_root):
     fold_root  = os.path.join(save_root, FOLD_DIR)
     _safe_mkdir(fold_root)
 
-    # 先拿一个样本检查形状
+    # Use one sample to check the shape first.
     sample = None
     subs = sorted([p.name for p in Path(phist_root).glob("subj_*") if p.is_dir()])
     for s in subs:
@@ -498,7 +500,7 @@ def build_all_folds(save_root):
         _safe_mkdir(src_root)
         _safe_mkdir(tgt_root)
 
-        # 目标域
+        # Target domain.
         tgt_files = sorted(glob.glob(f"{phist_root}/{target_sid_tag}/round_*/*.npz"))
         for fp in tgt_files:
             rel = fp.split(f"{phist_root}/")[1]
@@ -507,7 +509,7 @@ def build_all_folds(save_root):
                 continue
             write_fold_trial(fp, outp, Q)
 
-        # 源域
+        # Source domain.
         for s in subs:
             if s == target_sid_tag:
                 continue
@@ -535,7 +537,7 @@ def build_all_folds(save_root):
 
 
 # ============
-# 主流程
+# Main flow
 # ============
 
 def build_parser() -> argparse.ArgumentParser:

@@ -33,12 +33,12 @@ SAVE_ROOT = "data/SEED"
 CHANNEL_XLSX = os.path.join(BASE_PATH, "channel-order.xlsx")
 LABEL_PATH = os.path.join(RAW_DATA, "label.mat")
 
-# Fold 的搬运方式：建议 copy（最稳，不依赖软链接权限）
+# Fold materialization mode: copy is recommended because it is the most robust and does not require symlink permissions.
 FOLD_LINK_MODE = "copy"   # "copy" | "symlink" | "hardlink"
 
 
 # =========================
-# 与你 JSD 脚本保持一致的超参
+# Hyperparameters kept consistent with the JSD script.
 # =========================
 N_CHANNELS = 62
 SFREQ = 200.0
@@ -51,7 +51,7 @@ WELCH_NOVERLAP = int(SFREQ * 1)   # 1s
 
 EPS = 1e-12
 
-# 频带（同 JSD）
+# Frequency bands, same as JSD.
 BANDS = {
     "delta": (1, 4),
     "theta": (4, 8),
@@ -61,21 +61,21 @@ BANDS = {
 }
 BAND_NAMES = list(BANDS.keys())
 
-# 目录名（对齐你的风格）
+# Directory names aligned with the existing layout.
 DE_DIR   = "_de"
 FOLD_DIR = "_fold_de"
 
 
 # =========================
-# 工具函数
+# Utility functions
 # =========================
 def _safe_mkdir(p):
     Path(p).mkdir(parents=True, exist_ok=True)
 
 def discover_subject_files(raw_data_path):
     """
-    返回 [[subj1_mat_basename...],[subj2...],...] 按 subject_id 升序
-    basenames 来自 Preprocessed_EEG 下的 *.mat（排除 label.mat）
+    Return [[subj1_mat_basename...], [subj2...], ...] ordered by subject_id.
+    Basenames come from *.mat files under Preprocessed_EEG, excluding label.mat.
     """
     subject_files = defaultdict(list)
     if not os.path.exists(raw_data_path):
@@ -109,16 +109,16 @@ def compute_psd(clip, fs):
 
 def quality_components(freqs, psd, clip, frontal_idx):
     """
-    复用你 JSD 脚本里的“简易 quality”思想：
-    - eog_corr：额叶通道与其他通道的相关性（粗略）
-    - line_noise：50Hz 附近占比
-    - muscle：45-60Hz 占比
-    输出 quality: (C,B) in [0,1]
+    Reuse the simple quality idea from the JSD script:
+    - eog_corr: approximate correlation between frontal channels and other channels
+    - line_noise: proportion around 50 Hz
+    - muscle: proportion from 45 to 60 Hz
+    Output quality: (C,B) in [0,1]
     """
     C = psd.shape[0]
     B = len(BANDS)
 
-    # eog_corr：与额叶均值信号的绝对相关
+    # eog_corr: absolute correlation with the mean frontal signal.
     front = clip[frontal_idx, :].mean(axis=0)
     front = (front - front.mean()) / (front.std() + EPS)
 
@@ -127,7 +127,7 @@ def quality_components(freqs, psd, clip, frontal_idx):
         x = clip[c, :]
         x = (x - x.mean()) / (x.std() + EPS)
         corr = np.clip(np.abs(np.dot(x, front) / (len(x) - 1)), 0.0, 1.0)
-        eog_corr[c, :] = corr  # 对所有频带同值（与你 JSD 一致风格）
+        eog_corr[c, :] = corr  # Same value for all bands, matching the JSD style.
 
     line_noise = np.zeros((C, B), dtype=np.float32)
     muscle     = np.zeros((C, B), dtype=np.float32)
@@ -150,11 +150,11 @@ def quality_components(freqs, psd, clip, frontal_idx):
 
 def de_from_psd(freqs, psd):
     """
-    用 Welch PSD 近似 band 方差：
-      var_band ≈ ∫ PSD(f) df ≈ sum(PSD) * df
+    Approximate band variance with Welch PSD:
+      var_band approx integral PSD(f) df approx sum(PSD) * df
     Differential Entropy (Gaussian):
       DE = 0.5 * ln(2*pi*e*var)
-    返回 (C,B) float32
+    Return (C,B) float32.
     """
     C = psd.shape[0]
     B = len(BANDS)
@@ -179,10 +179,10 @@ def de_from_psd(freqs, psd):
 
 def load_channel_info_and_labels(channel_xlsx, label_path):
     """
-    仅加载：
-      - 通道顺序（metadata + quality 的额叶索引）
-      - label.mat 标签向量（长度=15）
-    与你 JSD 脚本保持一致：不创建 MNE info/montage，不做 ICA。
+    Load only:
+      - channel order, used for metadata and frontal indices in quality
+      - label.mat label vector, length 15
+    Keep this consistent with the JSD script: do not create MNE info/montage or run ICA.
     """
     channel_order = pd.read_excel(channel_xlsx, header=None)
 
@@ -217,7 +217,7 @@ def load_channel_info_and_labels(channel_xlsx, label_path):
 
 
 # =========================
-# Step 1：生成每 trial 的 DE 到 _de/
+# Step 1: Generate per-trial DE files under _de/.
 # =========================
 def build_de_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
     out_root = os.path.join(save_root, DE_DIR)
@@ -231,14 +231,14 @@ def build_de_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
     print(f"[DE] out_root={out_root}")
     print(f"[DE] window={WINDOW_SEC}s stride={STRIDE_SEC}s fs={SFREQ}Hz")
 
-    # trial key：只认 *_eeg{1..15}，并按 {数字} 排序，避免错位
+    # Trial key: accept only *_eeg{1..15} and sort by number to avoid misalignment.
     re_eeg = re.compile(r"eeg(\d+)$", re.IGNORECASE)
 
     for subject_index, mats in enumerate(subject_groups, start=1):
         subj_dir = os.path.join(out_root, f"subj_{subject_index:02d}")
         _safe_mkdir(subj_dir)
 
-        # 每个 subject 一般 3 个 mat（3 次实验/会话）
+        # Each subject usually has 3 mat files, one per experiment/session.
         for round_num, base in enumerate(mats, start=1):
             mat_path = os.path.join(raw_root, base + ".mat")
             if not os.path.exists(mat_path):
@@ -257,12 +257,12 @@ def build_de_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
                 m = re_eeg.search(k)
                 if m:
                     trial_keys.append((int(m.group(1)), k))
-            trial_keys.sort(key=lambda x: x[0])  # 按 eeg序号排序
+            trial_keys.sort(key=lambda x: x[0])  # Sort by eeg index.
             if len(trial_keys) != 15:
                 print(f"[WARN] {mat_path} trial_keys={len(trial_keys)} (expected 15). keys(example)={trial_keys[:5]}")
 
             for trial_id, key in trial_keys:
-                # label：来自 label.mat（按 trial_id 1..15）
+                # Label comes from label.mat, indexed by trial_id 1..15.
                 if trial_id < 1 or trial_id > len(labels_vec):
                     print(f"[WARN] invalid trial_id={trial_id} key={key} in {mat_path}")
                     continue
@@ -274,7 +274,7 @@ def build_de_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
                     print(f"[WARN] bad shape {raw_np.shape} for {mat_path}::{key}")
                     continue
 
-                # 统一成 (C,T)
+                # Normalize to (C,T).
                 if raw_np.shape[0] != N_CHANNELS and raw_np.shape[1] == N_CHANNELS:
                     raw_np = raw_np.T
                 if raw_np.shape[0] != N_CHANNELS:
@@ -284,7 +284,7 @@ def build_de_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
                 subject_name = f's{subject_index:02d}'
                 save_path = os.path.join(round_dir, f'{subject_name}_eeg{trial_id}.npz')
 
-                # 断点续跑
+                # Resume support: skip existing outputs.
                 if os.path.exists(save_path):
                     continue
 
@@ -332,7 +332,7 @@ def build_de_all(raw_root, save_root, ch_names_eeg, frontal_idx, labels_vec):
 
 
 # =========================
-# Step 2：用 _de/ 生成 _fold_de/（结构对齐 _fold_jsd）
+# Step 2: Generate _fold_de/ from _de/, with the structure aligned to _fold_jsd.
 # =========================
 def _link_or_copy(src: str, dst: str, mode: str):
     dst_p = Path(dst)
@@ -374,7 +374,7 @@ def build_all_folds_from_de(save_root, mode="copy"):
         _safe_mkdir(test_dir)
         _safe_mkdir(train_dir)
 
-        # test_target：来自 target_subj 的 round_*/ *.npz（不再套 subj_XX）
+        # test_target comes from round_*/ *.npz for target_subj, without an extra subj_XX layer.
         target_rounds = sorted(Path(de_root, target_subj).glob("round_*"))
         for rdir in target_rounds:
             rr = rdir.name  # round_1
@@ -382,7 +382,7 @@ def build_all_folds_from_de(save_root, mode="copy"):
                 dst = test_dir / rr / npz.name
                 _link_or_copy(str(npz), str(dst), mode)
 
-        # train_source：其余 subj 的 round_*/ *.npz -> train_source/subj_YY/round_R/*.npz
+        # train_source maps other subjects' round_*/ *.npz to train_source/subj_YY/round_R/*.npz.
         for s in subs:
             if s == target_subj:
                 continue
