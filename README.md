@@ -1,23 +1,9 @@
 # CMRD
 
-Code for **Confidence-Modulation Reference Deviation Representation (CMRD)** for
-target-free cross-subject EEG emotion recognition on SEED and SEED-IV.
+Code for **Confidence-Modulation Reference Deviation Representation (CMRD)** on
+SEED and SEED-IV for cross-subject EEG emotion recognition.
 
-They will be released if required during review or after the paper is
-accepted.
-
-## Files
-
-```text
-Preprocess/
-├── Spatial.py
-├── Pre-DE-SEED.py
-├── Pre-RJSD-SEED.py
-├── Pre-SEED.py
-└── Pre-SEED-IV.py
-Train/
-└── Train.py
-```
+This repository will be fully released when we are required during the review or the paper is accepted.
 
 ## Environment
 
@@ -32,59 +18,104 @@ or
 pip install -r requirements.txt
 ```
 
-Install a PyTorch build that matches your CUDA version for GPU training.
+Install the PyTorch build that matches your CUDA version if GPU training is
+used.
 
-## Spatial Graph
-
-`A_spatial.npy` can be built from the channel order file and the `.locs` file:
-
-```bash
-python Preprocess/Spatial.py \
-  --channel-order /path/to/Channel\ Order.xlsx \
-  --locs /path/to/channel_62_pos.locs \
-  --save-root data/SEED-IV
-```
-
-This writes `A_spatial.npy` and `A_meta.npz`. By default it also writes
-`W_topo_csr.npz` and `topo_mapping.npz`; use `--no-save-topo` to skip them.
-
-## Training Data
-
-`Train/Train.py` expects prebuilt LOOCV folds:
+## Files
 
 ```text
-<data_root>/
-├── A_spatial.npy
-├── fold_subj_01/
-│   ├── train_source/
-│   │   └── *.npz
-│   └── test_target/
-│       └── *.npz
-└── fold_subj_02/
+Preprocess/
+├── Pre-RJSD-SEED.py   # SEED JSD folds
+├── Pre-DE-SEED.py     # SEED DE folds
+├── Pre-SEED.py        # SEED zDE-gated fusion
+├── Pre-SEED-IV.py     # SEED-IV end-to-end preprocessing
+└── Spatial.py         # spatial adjacency A_spatial.npy
+Train/
+└── Train.py
 ```
 
-Each `.npz` trial uses `jsd_gated` by default, with shape `(T, 62, B)`, plus
-`label`. SEED labels are mapped from `-1, 0, 1` to `0, 1, 2`; SEED-IV labels are
-expected to be `0, 1, 2, 3`.
+## Data Layout
 
-## Preprocessing
+Place the raw datasets under `data/`:
 
-The preprocessing scripts are in `Preprocess/`. 
+```text
+data/
+├── SEED-RAW/
+│   ├── Preprocessed_EEG/
+│   │   ├── *.mat
+│   │   └── label.mat
+│   ├── channel-order.xlsx
+│   └── channel_62_pos.locs
+└── SEED-IV-RAW/
+    ├── eeg_raw_data/
+    │   ├── 1/*.mat
+    │   ├── 2/*.mat
+    │   └── 3/*.mat
+    ├── Zehn-Channel Order.xlsx
+    └── channel_62_pos.locs
+```
+
+If your file names differ, pass the corresponding paths with the command-line
+arguments shown below.
+
+## Run SEED
 
 ```bash
-python Preprocess/Pre-SEED-IV.py 
+python Preprocess/Pre-RJSD-SEED.py \
+  --base-path data/SEED-RAW \
+  --save-root data/SEED
+
+python Preprocess/Pre-DE-SEED.py \
+  --base-path data/SEED-RAW \
+  --save-root data/SEED
+
+python Preprocess/Pre-SEED.py \
+  --jsd_root data/SEED/_fold_jsd \
+  --de_root data/SEED/_fold_de \
+  --save_root data/SEED/_fold_jsd_degate
+
+python Preprocess/Spatial.py \
+  --channel-order data/SEED-RAW/channel-order.xlsx \
+  --locs data/SEED-RAW/channel_62_pos.locs \
+  --save-root data/SEED/_fold_jsd_degate
+```
+
+Then edit `SeedConfig` in `Train/Train.py`:
+
+```python
+data_root = "data/SEED/_fold_jsd_degate"
+out_dir = "runs/SEED"
+graph_bias_root = "data/SEED/_fold_jsd_degate"
+```
+
+## Run SEED-IV
+
+```bash
+python Preprocess/Pre-SEED-IV.py \
+  --base-path data/SEED-IV-RAW \
+  --save-root data/SEED-IV
+
+python Preprocess/Spatial.py \
+  --channel-order "data/SEED-IV-RAW/Zehn-Channel Order.xlsx" \
+  --locs data/SEED-IV-RAW/channel_62_pos.locs \
+  --save-root data/SEED-IV/_fold_jsd_degate
+```
+
+Then edit `SeedIVConfig` in `Train/Train.py`:
+
+```python
+data_root = "data/SEED-IV/_fold_jsd_degate"
+out_dir = "runs/SEED-IV"
+jsd_root = "data/SEED-IV/_fold_jsd_degate"
 ```
 
 ## Training
 
-Edit `SeedConfig` or `SeedIVConfig` in `Train/Train.py`.
+In `Train/Train.py`, keep only the dataset block you want to run at the bottom,
+then start training:
 
 ```bash
 python Train/Train.py
 ```
 
-Each fold writes `train.log` or `eval.log`, `metrics.json`,
-`model_final.pth`, and `used_channel_graph.npy`. The full run summary is saved
-as `overall_metrics.json`.
-
-
+Outputs are written to the configured `out_dir`.
