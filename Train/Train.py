@@ -484,8 +484,7 @@ def train_and_eval_one_fold_seed(cfg: SeedConfig, fold_dir: Path, out_fold_dir: 
 
         crit = nn.CrossEntropyLoss(label_smoothing=float(cfg.label_smoothing))
 
-        best_acc = -1.0
-        best_state = None
+        
         for ep in range(1, cfg.epochs + 1):
             model.train()
             loss_sum, n = 0.0, 0
@@ -507,9 +506,7 @@ def train_and_eval_one_fold_seed(cfg: SeedConfig, fold_dir: Path, out_fold_dir: 
             if ep % cfg.eval_every == 0 or ep == cfg.epochs:
                 acc_t, cm_t = _eval_model(model, dl_test, device, chan_bias)
                 print(f"[SEED][ep {ep:03d}/{cfg.epochs}] loss={tr_loss:.4f}  acc_tgt={acc_t:.4f}")
-                if acc_t > best_acc:
-                    best_acc = acc_t
-                    best_state = copy.deepcopy(model.state_dict())
+                
 
 
 
@@ -526,7 +523,7 @@ def train_and_eval_one_fold_seed(cfg: SeedConfig, fold_dir: Path, out_fold_dir: 
             "acc_target": float(acc_tgt),
             "cm_source": cm_src.tolist(),
             "cm_target": cm_tgt.tolist(),
-            "best_acc_target": float(best_acc),
+            
         }
         json_dump(metrics, out_fold_dir / "metrics.json")
         return metrics
@@ -571,7 +568,7 @@ def evaluate_only_seed(cfg: SeedConfig, fold_dir: Path, out_fold_dir: Path) -> D
             "acc_target": float(acc_tgt),
             "cm_source": cm_src.tolist(),
             "cm_target": cm_tgt.tolist(),
-            "best_acc_target": float(acc_tgt),
+            
         }
         json_dump(metrics, out_fold_dir / "metrics.json")
         print(f"[SEED][eval-only] acc_tgt={acc_tgt:.4f}")
@@ -839,8 +836,7 @@ def train_and_eval_one_fold_seediv(cfg: SeedIVConfig, fold_dir: Path, out_fold_d
         scheduler = CosineAnnealingLR(opt, T_max=cfg.epochs, eta_min=cfg.lr * float(cfg.MinLrPer))
         crit = nn.CrossEntropyLoss(label_smoothing=float(cfg.label_smoothing))
 
-        best_acc = -1.0
-        best_state = None
+        
         for ep in range(1, cfg.epochs + 1):
             model.train()
             loss_sum, n = 0.0, 0
@@ -862,9 +858,7 @@ def train_and_eval_one_fold_seediv(cfg: SeedIVConfig, fold_dir: Path, out_fold_d
             if ep % cfg.eval_every == 0 or ep == cfg.epochs:
                 acc_t, cm_t = _eval_model(model, dl_test, device, chan_bias)
                 print(f"[SEED-IV][ep {ep:03d}/{cfg.epochs}] loss={tr_loss:.4f}  acc_tgt={acc_t:.4f}")
-                if acc_t > best_acc:
-                    best_acc = acc_t
-                    best_state = copy.deepcopy(model.state_dict())
+                
 
 
         acc_src, cm_src = _eval_model(model, dl_train, device, chan_bias)
@@ -880,7 +874,7 @@ def train_and_eval_one_fold_seediv(cfg: SeedIVConfig, fold_dir: Path, out_fold_d
             "acc_target": float(acc_tgt),
             "cm_source": cm_src.tolist(),
             "cm_target": cm_tgt.tolist(),
-            "best_acc_target": float(best_acc),
+            
         }
         json_dump(metrics, out_fold_dir / "metrics.json")
         return metrics
@@ -932,7 +926,7 @@ def evaluate_only_seediv(cfg: SeedIVConfig, fold_dir: Path, out_fold_dir: Path) 
             "acc_target": float(acc_tgt),
             "cm_source": cm_src.tolist(),
             "cm_target": cm_tgt.tolist(),
-            "best_acc_target": float(acc_tgt),
+            
         }
         json_dump(metrics, out_fold_dir / "metrics.json")
         print(f"[SEED-IV][eval-only] acc_tgt={acc_tgt:.4f}")
