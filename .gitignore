@@ -14,8 +14,6 @@ logs/
 *.pt
 *.ckpt
 *.log
-Preprocess/Pre-SEED-IV.py
-Preprocess/Pre-SEED.py
 
 Preprocess
 !Preprocess/
