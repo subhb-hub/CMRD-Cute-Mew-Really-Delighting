@@ -1,0 +1,52 @@
+{
+  "dataset_name": "SEED-IV",
+  "data": {
+    "time_domain_dir": "Dataset/Ori/SEED-IV/eeg_raw_data",
+    "processed_path": "cbm_rebuild/outputs/processed/seediv_de_1s.npz",
+    "channels": 62,
+    "num_classes": 4
+  },
+  "preprocessing": {
+    "original_sampling_rate": 200,
+    "target_sampling_rate": 200,
+    "broad_band_hz": [1.0, 75.0],
+    "filter_order": 4,
+    "window_seconds": 1.0,
+    "hop_seconds": 1.0,
+    "bands_hz": {
+      "delta": [1.0, 4.0],
+      "theta": [4.0, 8.0],
+      "alpha": [8.0, 14.0],
+      "beta": [14.0, 31.0],
+      "gamma": [31.0, 50.0]
+    }
+  },
+  "model": {
+    "d_model": 128,
+    "nhead": 8,
+    "num_layers": 2,
+    "dim_feedforward": 256,
+    "dropout": 0.1
+  },
+  "training": {
+    "seed": 42,
+    "device": "auto",
+    "deterministic": true,
+    "epochs": 50,
+    "batch_size": 32,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "validation_fraction": 0.1,
+    "early_stopping_patience": 10,
+    "gradient_clip_norm": 1.0,
+    "label_smoothing": 0.0,
+    "num_workers": 0,
+    "pin_memory": true
+  },
+  "output": {
+    "log_dir": "cbm_rebuild/outputs/logs",
+    "checkpoint_dir": "cbm_rebuild/outputs/checkpoints",
+    "result_dir": "cbm_rebuild/outputs/results",
+    "result_stem": "seediv_de_transformer_1s_loso"
+  }
+}
