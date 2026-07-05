@@ -1,20 +1,21 @@
 __pycache__/
 *.py[cod]
-.DS_Store
+*.log
+*.pt
+*.pth
+*.ckpt
+.pytest_cache/
+.coverage
 .idea/
 .vscode/
 .ipynb_checkpoints/
+.DS_Store
 
-Dataset/
+# Reproducible generated artifacts are recorded by manifests but not committed.
 runs/
 outputs/
-logs/
+Dataset/
+*.egg-info/
+build/
+dist/
 
-*.pth
-*.pt
-*.ckpt
-*.log
-
-Preprocess
-!Preprocess/
-!Preprocess/Spatial.py
