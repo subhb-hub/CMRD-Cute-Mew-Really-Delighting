@@ -1,0 +1,72 @@
+experiment:
+  dataset: seediv
+  feature: rd
+  model: plain_transformer
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs
+dataset:
+  raw_dir: Ori/SEED-IV/eeg_raw_data
+  channels: 62
+  subjects: 15
+  classes: 4
+signal:
+  original_rate: 200
+  target_rate: 200
+  broad_band_hz: [1.0, 75.0]
+  filter_order: 4
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 31.0]
+    gamma: [31.0, 50.0]
+feature:
+  name: reference_deviation
+  old_name: rjsd
+  hist_bins_per_band: 32
+  spectral_nfft: 512
+  storage_dtype: float16
+split:
+  protocol: loso
+  validation_subjects: 2
+  seed: 2026
+model:
+  d_model: 128
+  nhead: 8
+  layers: 2
+  feedforward: 512
+  dropout: 0.1
+training:
+  seeds: [42, 3407, 2026]
+  device: auto
+  deterministic: true
+  epochs: 100
+  batch_size: 32
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  label_smoothing: 0.0
+  early_stopping_patience: 15
+  gradient_clip_norm: 1.0
+  num_workers: 0
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: true
+  selection_file: ""
+  architectures:
+    - {d_model: 64, nhead: 4, layers: 2, feedforward: 256}
+    - {d_model: 128, nhead: 8, layers: 2, feedforward: 512}
+    - {d_model: 128, nhead: 8, layers: 3, feedforward: 512}
+  optimizations:
+    - {learning_rate: 0.0003, dropout: 0.1, weight_decay: 0.0001, label_smoothing: 0.0}
+    - {learning_rate: 0.0001, dropout: 0.1, weight_decay: 0.0001, label_smoothing: 0.0}
+    - {learning_rate: 0.0001, dropout: 0.2, weight_decay: 0.0001, label_smoothing: 0.0}
+    - {learning_rate: 0.0001, dropout: 0.2, weight_decay: 0.001, label_smoothing: 0.05}
+output:
+  save_checkpoints: true
+

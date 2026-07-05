@@ -1,2 +1,0 @@
-"""Independent CBM reproducibility pipeline."""
-
