@@ -71,6 +71,35 @@ python scripts/train_de.py --config configs/seed/de.yaml --mode tune --fold 1 `
   --set training.epochs=2 --set training.device=cpu
 ```
 
+### SEED-IV ICA-cleaned DE + RJSD preprocessing
+
+The separate legacy-protocol diagnostic pipeline adds 50 Hz notch filtering,
+1 Hz high-pass before ICA, `find_bads_eog`, `find_bads_muscle`, final 1-75 Hz
+band-pass filtering, and 1 s windows with a 0.5 s hop. It saves DE globally and
+fits fold-specific RJSD references from source-training subjects only:
+
+```powershell
+conda activate cmrd
+python scripts/preprocess_seediv_de_rjsd_ica.py --stage all --strict-ica --resume
+```
+
+Use `--stage trials` and `--stage folds` to run the expensive ICA and fold
+construction separately. Generated data are placed under
+`../Dataset/Processed/CMRD/seediv/de_rjsd_ica_1s_hop05/<signature>/`.
+
+The matching SEED pipeline starts from the official `Preprocessed_EEG` trials,
+does not repeat downsampling or the official 0-75 Hz preprocessing, verifies
+that the SEED/SEED-IV channel orders match before reusing the montage, and
+interpolates extreme-variance bad channels before ICA:
+
+```powershell
+conda activate cmrd
+python scripts/preprocess_seed_de_rjsd_ica.py --stage all --strict-ica --resume
+```
+
+Its generated data are placed under
+`../Dataset/Processed/CMRD/seed/de_rjsd_ica_1s_hop05/<signature>/`.
+
 `--resume` reuses complete cache/job artifacts, while `--force` explicitly
 recomputes them. Formal `final` training requires a completed source-only tuning
 selection for every requested fold.
@@ -124,4 +153,3 @@ conda run -n bilstm python -m unittest discover -s tests -v
 The tests cover formulas and shapes, configuration/path handling, cache
 signatures, subject isolation, source-only normalization, padding invariance,
 target-free tuning, checkpoint/result writing, and resume behavior.
-
