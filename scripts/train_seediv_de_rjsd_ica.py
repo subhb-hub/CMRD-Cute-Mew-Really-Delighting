@@ -8,11 +8,16 @@ import logging
 import math
 import shutil
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+import torch
+import yaml
+from torch import nn
+from torch.utils.data import DataLoader
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,13 +26,16 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from cmrd.data.records import TrialSample
+from cmrd.features.rd import normalize_histograms, transform_rd
 from cmrd.io import read_json, write_json
-from cmrd.training.engine import train_once
-from cmrd.training.runtime import environment_manifest, select_device
+from cmrd.models import HierarchicalChannelBandTransformer, PlainTransformer
+from cmrd.training.engine import SequenceDataset, collate_sequences, evaluate, fit_normalizer
+from cmrd.training.runtime import environment_manifest, seed_everything, select_device
 
 
 LOGGER = logging.getLogger("seediv.cmrd_ica.train")
 FEATURES = ("cmrd", "de", "rjsd", "fusion")
+MODELS = ("plain_transformer", "hierarchical_attention")
 EXPECTED_TRIALS = 15 * 3 * 24
 EXPECTED_CHANNELS = 62
 EXPECTED_BANDS = 5
@@ -35,6 +43,50 @@ EXPECTED_CLASSES = 4
 DEFAULT_DATA_PARENT = (
     ROOT.parent / "Dataset" / "Processed" / "CMRD" / "seediv" / "de_rjsd_ica_1s_hop05"
 )
+ALL_SOURCE_STATS_ROOT = (
+    ROOT / "runs" / "diagnostics" / "seediv_feature_tuning" / "_all_source_statistics"
+)
+
+CONFIG_FIELDS = {
+    "paths": {
+        "data_root": "data_root",
+        "output_root": "output_root",
+    },
+    "experiment": {
+        "run_name": "run_name",
+        "feature": "feature",
+        "alpha": "alpha",
+        "folds": "fold",
+        "seeds": "seed",
+    },
+    "model": {
+        "name": "model",
+        "d_model": "d_model",
+        "nhead": "nhead",
+        "layers": "layers",
+        "channel_heads": "channel_heads",
+        "temporal_heads": "temporal_heads",
+        "temporal_layers": "temporal_layers",
+        "feedforward": "feedforward",
+        "dropout": "dropout",
+    },
+    "training": {
+        "epochs": "epochs",
+        "batch_size": "batch_size",
+        "learning_rate": "learning_rate",
+        "minimum_learning_rate": "minimum_learning_rate",
+        "weight_decay": "weight_decay",
+        "label_smoothing": "label_smoothing",
+        "gradient_clip_norm": "gradient_clip_norm",
+    },
+    "runtime": {
+        "device": "device",
+        "num_workers": "num_workers",
+        "resume": "resume",
+        "validate_only": "validate_only",
+        "deep_validate": "deep_validate",
+    },
+}
 
 
 def _canonical_json(value: Any) -> str:
@@ -43,6 +95,70 @@ def _canonical_json(value: Any) -> str:
 
 def _settings_hash(value: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()[:12]
+
+
+def _feature_name(value: str) -> str:
+    feature = value.strip().lower()
+    aliases = {"jsd": "rjsd", "de+rjsd": "fusion", "rjsd+de": "fusion"}
+    return aliases.get(feature, feature)
+
+
+def _config_defaults(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as stream:
+        payload = yaml.safe_load(stream)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Config must contain a YAML mapping: {path}")
+    unknown_sections = set(payload) - set(CONFIG_FIELDS)
+    if unknown_sections:
+        raise ValueError(f"Unknown config sections: {sorted(unknown_sections)}")
+
+    defaults: dict[str, Any] = {}
+    for section, values in payload.items():
+        if not isinstance(values, dict):
+            raise ValueError(f"Config section {section!r} must be a mapping")
+        special_fields = {"pin_memory", "deterministic"} if section == "runtime" else set()
+        unknown_fields = set(values) - set(CONFIG_FIELDS[section]) - special_fields
+        if unknown_fields:
+            raise ValueError(f"Unknown fields in config section {section!r}: {sorted(unknown_fields)}")
+        for key, value in values.items():
+            if value is None:
+                continue
+            if section == "runtime" and key == "pin_memory":
+                defaults["no_pin_memory"] = not bool(value)
+            elif section == "runtime" and key == "deterministic":
+                defaults["non_deterministic"] = not bool(value)
+            else:
+                defaults[CONFIG_FIELDS[section][key]] = value
+
+    if "feature" in defaults:
+        defaults["feature"] = _feature_name(str(defaults["feature"]))
+        if defaults["feature"] not in FEATURES:
+            raise ValueError(f"Unknown feature in config: {defaults['feature']!r}")
+    if "model" in defaults and defaults["model"] not in MODELS:
+        raise ValueError(f"Unknown model in config: {defaults['model']!r}")
+    for key in ("fold", "seed"):
+        if key in defaults and not isinstance(defaults[key], list):
+            raise ValueError(f"Config value {key!r} must be a YAML list")
+    return defaults
+
+
+def parse_args_with_config(
+    argv: list[str] | None = None,
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.Namespace:
+    preliminary = argparse.ArgumentParser(add_help=False)
+    preliminary.add_argument("--config")
+    selected, _ = preliminary.parse_known_args(argv)
+    parser = parser or build_parser()
+    config_path = None
+    if selected.config:
+        config_path = Path(selected.config).expanduser().resolve()
+        if not config_path.is_file():
+            raise FileNotFoundError(f"Config does not exist: {config_path}")
+        parser.set_defaults(**_config_defaults(config_path))
+    args = parser.parse_args(argv)
+    args.config = str(config_path) if config_path is not None else None
+    return args
 
 
 def _resolve_data_root(value: str | None) -> Path:
@@ -309,6 +425,36 @@ def _fit_de_stats(root: Path, entries: Iterable[dict[str, Any]]) -> tuple[np.nda
     return mean.astype(np.float32), std.astype(np.float32), count
 
 
+def _fit_all_source_statistics(
+    root: Path,
+    entries: Iterable[dict[str, Any]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    de_total = np.zeros((EXPECTED_CHANNELS, EXPECTED_BANDS), dtype=np.float64)
+    de_total_sq = np.zeros_like(de_total)
+    reference_total = np.zeros((EXPECTED_CHANNELS, EXPECTED_BANDS, 32), dtype=np.float64)
+    count = 0
+    for entry in entries:
+        with np.load(root / entry["de_phist_path"], allow_pickle=False) as archive:
+            de = np.asarray(archive["de"], dtype=np.float64)
+            histogram = normalize_histograms(np.asarray(archive["p_hist"], dtype=np.float32))
+        if de.ndim != 3 or de.shape[1:] != de_total.shape or histogram.shape != (*de.shape, 32):
+            raise ValueError(f"Invalid DE/p_hist tensors for {entry['trial_id']}")
+        if not np.isfinite(de).all() or not np.isfinite(histogram).all():
+            raise FloatingPointError(f"Non-finite all-source statistics input for {entry['trial_id']}")
+        de_total += de.sum(axis=0)
+        de_total_sq += np.square(de).sum(axis=0)
+        reference_total += histogram.sum(axis=0, dtype=np.float64)
+        count += de.shape[0]
+    if count == 0:
+        raise ValueError("Cannot fit all-source statistics from zero windows")
+    de_mean = de_total / count
+    variance = np.maximum(de_total_sq / count - np.square(de_mean), 0.0)
+    de_std = np.sqrt(variance)
+    de_std[de_std < 1e-6] = 1.0
+    reference = normalize_histograms(reference_total / count)
+    return de_mean.astype(np.float32), de_std.astype(np.float32), reference, count
+
+
 def _load_samples(
     root: Path,
     entries: Iterable[dict[str, Any]],
@@ -316,6 +462,7 @@ def _load_samples(
     de_mean: np.ndarray | None,
     de_std: np.ndarray | None,
     alpha: float,
+    reference: np.ndarray | None = None,
 ) -> list[TrialSample]:
     samples = []
     for entry in entries:
@@ -325,8 +472,14 @@ def _load_samples(
             with np.load(root / entry["de_phist_path"], allow_pickle=False) as archive:
                 de = np.asarray(archive["de"], dtype=np.float32)
         if feature in {"rjsd", "cmrd", "fusion"}:
-            with np.load(root / entry["rjsd_path"], allow_pickle=False) as archive:
-                rjsd = np.asarray(archive["rjsd"], dtype=np.float32)
+            if reference is None:
+                with np.load(root / entry["rjsd_path"], allow_pickle=False) as archive:
+                    rjsd = np.asarray(archive["rjsd"], dtype=np.float32)
+            else:
+                with np.load(root / entry["de_phist_path"], allow_pickle=False) as archive:
+                    histogram = np.asarray(archive["p_hist"], dtype=np.float32)
+                flat = transform_rd(histogram, reference)
+                rjsd = flat.reshape(flat.shape[0], EXPECTED_CHANNELS, EXPECTED_BANDS)
         if de is not None and rjsd is not None and de.shape != rjsd.shape:
             raise ValueError(f"DE/RJSD shape mismatch for {entry['trial_id']}: {de.shape} vs {rjsd.shape}")
 
@@ -366,30 +519,248 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _make_loader(
+    samples: list[TrialSample],
+    mean: np.ndarray,
+    std: np.ndarray,
+    training: dict[str, Any],
+    shuffle: bool,
+    seed: int,
+) -> DataLoader:
+    return DataLoader(
+        SequenceDataset(samples, mean, std),
+        batch_size=int(training["batch_size"]),
+        shuffle=shuffle,
+        num_workers=int(training.get("num_workers", 0)),
+        pin_memory=bool(training.get("pin_memory", True) and torch.cuda.is_available()),
+        collate_fn=collate_sequences,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+
+def _metrics_log(label: str, metrics: dict[str, Any]) -> str:
+    per_class = ", ".join(
+        f"c{row['class']}:P={row['precision']:.4f}/R={row['recall']:.4f}/F1={row['f1']:.4f}/N={row['support']}"
+        for row in metrics["per_class"]
+    )
+    return (
+        f"{label} ACC={metrics['accuracy']:.4f} BACC={metrics['balanced_accuracy']:.4f} "
+        f"Macro-F1={metrics['macro_f1']:.4f} | {per_class} | CM={metrics['confusion_matrix']}"
+    )
+
+
+def _build_model(
+    input_dim: int,
+    max_length: int,
+    model_config: dict[str, Any],
+) -> nn.Module:
+    name = str(model_config["name"])
+    shared = {
+        "input_dim": input_dim,
+        "classes": EXPECTED_CLASSES,
+        "max_length": max_length,
+        "d_model": int(model_config["d_model"]),
+        "feedforward": int(model_config["feedforward"]),
+        "dropout": float(model_config["dropout"]),
+    }
+    if name == "plain_transformer":
+        return PlainTransformer(
+            **shared,
+            nhead=int(model_config["nhead"]),
+            layers=int(model_config["layers"]),
+        )
+    if name == "hierarchical_attention":
+        return HierarchicalChannelBandTransformer(
+            **shared,
+            channels=int(model_config.get("channels", EXPECTED_CHANNELS)),
+            channel_heads=int(model_config["channel_heads"]),
+            temporal_heads=int(model_config["temporal_heads"]),
+            temporal_layers=int(model_config["temporal_layers"]),
+        )
+    raise ValueError(f"Unknown model: {name!r}")
+
+
+def _train_all_source_once(
+    train_samples: list[TrialSample],
+    test_samples: list[TrialSample],
+    model_config: dict[str, Any],
+    training: dict[str, Any],
+    seed: int,
+    device: torch.device,
+    output_dir: Path,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    seed_everything(seed, bool(training.get("deterministic", True)))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    mean, std = fit_normalizer(train_samples)
+    input_dim = train_samples[0].x.shape[1]
+    max_length = max(sample.x.shape[0] for sample in train_samples + test_samples)
+    model = _build_model(input_dim, max_length, model_config).to(device)
+    train_loader = _make_loader(train_samples, mean, std, training, True, seed)
+    source_eval_loader = _make_loader(train_samples, mean, std, training, False, seed)
+    test_loader = _make_loader(test_samples, mean, std, training, False, seed)
+    criterion = nn.CrossEntropyLoss(label_smoothing=float(training.get("label_smoothing", 0.0)))
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(training["learning_rate"]),
+        weight_decay=float(training["weight_decay"]),
+    )
+    epochs = int(training["epochs"])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(epochs, 1),
+        eta_min=float(training.get("minimum_learning_rate", 1e-6)),
+    )
+    history: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    log_path = output_dir / "train.log"
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    with log_path.open("w", encoding="utf-8") as log:
+        header = {
+            **context,
+            "seed": seed,
+            "device": str(device),
+            "input_dim": input_dim,
+            "max_length": max_length,
+            "model_parameters": parameter_count,
+            "train_trials": len(train_samples),
+            "test_trials": len(test_samples),
+        }
+        log.write(json.dumps(header, ensure_ascii=False) + "\n")
+        LOGGER.info(
+            "Fold %02d seed %d model parameters=%d input_dim=%d max_length=%d",
+            int(context["target_subject"]), seed, parameter_count, input_dim, max_length,
+        )
+        for epoch in range(1, epochs + 1):
+            model.train()
+            loss_sum = 0.0
+            seen = 0
+            for data, mask, labels in train_loader:
+                data = data.to(device, non_blocking=True)
+                mask = mask.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                loss = criterion(model(data, mask), labels)
+                loss.backward()
+                clip = float(training.get("gradient_clip_norm", 0.0))
+                if clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), clip)
+                optimizer.step()
+                loss_sum += float(loss.item()) * labels.shape[0]
+                seen += labels.shape[0]
+            scheduler.step()
+            row = {
+                "epoch": epoch,
+                "train_loss": loss_sum / max(seen, 1),
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "elapsed_seconds": time.perf_counter() - started,
+            }
+            history.append(row)
+            log.write(json.dumps(row) + "\n")
+            log.flush()
+            LOGGER.info(
+                "Fold %02d seed %d epoch %03d/%03d loss=%.6f lr=%.8g",
+                int(context["target_subject"]), seed, epoch, epochs,
+                row["train_loss"], row["learning_rate"],
+            )
+
+        source_metrics = evaluate(model, source_eval_loader, device, EXPECTED_CLASSES)
+        test_metrics = evaluate(model, test_loader, device, EXPECTED_CLASSES)
+        source_line = _metrics_log("SOURCE", source_metrics)
+        test_line = _metrics_log("TARGET", test_metrics)
+        log.write(source_line + "\n" + test_line + "\n")
+        LOGGER.info(source_line)
+        LOGGER.info(test_line)
+
+    _write_csv(output_dir / "epochs.csv", history)
+    checkpoint = {
+        "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "normalization_mean": mean,
+        "normalization_std": std,
+        "model": model_config,
+        "training": training,
+        "context": context,
+        "seed": seed,
+        "final_epoch": epochs,
+        "input_dim": input_dim,
+        "max_length": max_length,
+        "model_parameters": parameter_count,
+    }
+    torch.save(checkpoint, output_dir / "final.pt")
+    result = {
+        **context,
+        "seed": seed,
+        "model": model_config,
+        "model_parameters": parameter_count,
+        "training": training,
+        "final_epoch": epochs,
+        "source": source_metrics,
+        "test": test_metrics,
+        "train_trials": len(train_samples),
+        "test_trials": len(test_samples),
+        "elapsed_seconds": time.perf_counter() - started,
+        "target_evaluated_during_training": False,
+    }
+    write_json(output_dir / "result.json", result)
+    return result
+
+
 def _flatten_result(result: dict[str, Any]) -> dict[str, Any]:
+    source = result["source"]
     test = result["test"]
-    validation = result["validation"]
     return {
         "target_subject": int(result["target_subject"]),
         "seed": int(result["seed"]),
         "feature": result["feature"],
-        "best_epoch": int(result["best_epoch"]),
-        "validation_accuracy": float(validation["accuracy"]),
-        "validation_macro_f1": float(validation["macro_f1"]),
+        "final_epoch": int(result["final_epoch"]),
+        "model_parameters": int(result["model_parameters"]),
+        "source_accuracy": float(source["accuracy"]),
+        "source_balanced_accuracy": float(source["balanced_accuracy"]),
+        "source_macro_f1": float(source["macro_f1"]),
+        "source_confusion_matrix": json.dumps(source["confusion_matrix"], separators=(",", ":")),
         "test_accuracy": float(test["accuracy"]),
         "test_balanced_accuracy": float(test["balanced_accuracy"]),
         "test_macro_f1": float(test["macro_f1"]),
         "test_confusion_matrix": json.dumps(test["confusion_matrix"], separators=(",", ":")),
         "train_trials": int(result["train_trials"]),
-        "validation_trials": int(result["validation_trials"]),
         "test_trials": int(result["test_trials"]),
         "elapsed_seconds": float(result["elapsed_seconds"]),
     }
 
 
+def _per_class_from_confusion(confusion: np.ndarray) -> list[dict[str, Any]]:
+    result = []
+    for label in range(confusion.shape[0]):
+        true_positive = float(confusion[label, label])
+        support = float(confusion[label].sum())
+        predicted = float(confusion[:, label].sum())
+        precision = true_positive / predicted if predicted else 0.0
+        recall = true_positive / support if support else 0.0
+        f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+        result.append({
+            "class": label,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": int(support),
+        })
+    return result
+
+
 def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    source_accuracies = np.asarray([row["source_accuracy"] for row in rows], dtype=np.float64)
+    source_macro_f1 = np.asarray([row["source_macro_f1"] for row in rows], dtype=np.float64)
     accuracies = np.asarray([row["test_accuracy"] for row in rows], dtype=np.float64)
+    balanced_accuracies = np.asarray([row["test_balanced_accuracy"] for row in rows], dtype=np.float64)
     macro_f1 = np.asarray([row["test_macro_f1"] for row in rows], dtype=np.float64)
+    source_confusion = sum(
+        (np.asarray(json.loads(row["source_confusion_matrix"]), dtype=np.int64) for row in rows),
+        start=np.zeros((EXPECTED_CLASSES, EXPECTED_CLASSES), dtype=np.int64),
+    )
+    test_confusion = sum(
+        (np.asarray(json.loads(row["test_confusion_matrix"]), dtype=np.int64) for row in rows),
+        start=np.zeros((EXPECTED_CLASSES, EXPECTED_CLASSES), dtype=np.int64),
+    )
     by_seed: dict[str, Any] = {}
     for seed in sorted({int(row["seed"]) for row in rows}):
         selected = [row for row in rows if int(row["seed"]) == seed]
@@ -402,16 +773,47 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "test_macro_f1_mean": float(seed_f1.mean()),
             "test_macro_f1_subject_std": float(seed_f1.std(ddof=0)),
         }
+    by_target: dict[str, Any] = {}
+    for target in sorted({int(row["target_subject"]) for row in rows}):
+        selected = [row for row in rows if int(row["target_subject"]) == target]
+        target_accuracy = np.asarray([row["test_accuracy"] for row in selected], dtype=np.float64)
+        target_f1 = np.asarray([row["test_macro_f1"] for row in selected], dtype=np.float64)
+        by_target[f"{target:02d}"] = {
+            "seeds": len(selected),
+            "test_accuracy_mean": float(target_accuracy.mean()),
+            "test_accuracy_seed_std": float(target_accuracy.std(ddof=0)),
+            "test_macro_f1_mean": float(target_f1.mean()),
+            "test_macro_f1_seed_std": float(target_f1.std(ddof=0)),
+        }
     return {
         "jobs": len(rows),
         "completed_subjects": sorted({int(row["target_subject"]) for row in rows}),
         "seeds": sorted({int(row["seed"]) for row in rows}),
+        "source_accuracy_mean_over_jobs": float(source_accuracies.mean()),
+        "source_accuracy_std_over_jobs": float(source_accuracies.std(ddof=0)),
+        "source_macro_f1_mean_over_jobs": float(source_macro_f1.mean()),
+        "source_macro_f1_std_over_jobs": float(source_macro_f1.std(ddof=0)),
         "test_accuracy_mean_over_jobs": float(accuracies.mean()),
         "test_accuracy_std_over_jobs": float(accuracies.std(ddof=0)),
+        "test_balanced_accuracy_mean_over_jobs": float(balanced_accuracies.mean()),
+        "test_balanced_accuracy_std_over_jobs": float(balanced_accuracies.std(ddof=0)),
         "test_macro_f1_mean_over_jobs": float(macro_f1.mean()),
         "test_macro_f1_std_over_jobs": float(macro_f1.std(ddof=0)),
+        "aggregate_source_confusion_matrix": source_confusion.tolist(),
+        "aggregate_source_per_class": _per_class_from_confusion(source_confusion),
+        "aggregate_test_confusion_matrix": test_confusion.tolist(),
+        "aggregate_test_per_class": _per_class_from_confusion(test_confusion),
         "by_seed": by_seed,
+        "by_target_subject": by_target,
     }
+
+
+def _write_run_results(run_root: Path, results: list[dict[str, Any]]) -> None:
+    ordered_results = sorted(results, key=lambda item: (int(item["target_subject"]), int(item["seed"])))
+    rows = [_flatten_result(result) for result in ordered_results]
+    _write_csv(run_root / "fold_results.csv", rows)
+    write_json(run_root / "detailed_results.json", ordered_results)
+    write_json(run_root / "summary.json", _aggregate(rows))
 
 
 def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> Path:
@@ -419,8 +821,13 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
     seeds = list(dict.fromkeys(args.seed))
     if any(not 1 <= fold <= 15 for fold in folds):
         raise ValueError("--fold values must be in 1..15")
-    if args.d_model % args.nhead:
+    if args.model == "plain_transformer" and args.d_model % args.nhead:
         raise ValueError("--d-model must be divisible by --nhead")
+    if args.model == "hierarchical_attention":
+        if args.d_model % args.channel_heads:
+            raise ValueError("--d-model must be divisible by --channel-heads")
+        if args.d_model % args.temporal_heads:
+            raise ValueError("--d-model must be divisible by --temporal-heads")
     if args.alpha <= 0:
         raise ValueError("--alpha must be positive")
 
@@ -435,14 +842,27 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
         "alpha": args.alpha,
         "folds": folds,
         "seeds": seeds,
-        "model": {
-            "name": "plain_masked_transformer",
-            "d_model": args.d_model,
-            "nhead": args.nhead,
-            "layers": args.layers,
-            "feedforward": args.feedforward,
-            "dropout": args.dropout,
-        },
+        "model": (
+            {
+                "name": "plain_transformer",
+                "d_model": args.d_model,
+                "nhead": args.nhead,
+                "layers": args.layers,
+                "feedforward": args.feedforward,
+                "dropout": args.dropout,
+            }
+            if args.model == "plain_transformer"
+            else {
+                "name": "hierarchical_attention",
+                "channels": EXPECTED_CHANNELS,
+                "d_model": args.d_model,
+                "channel_heads": args.channel_heads,
+                "temporal_heads": args.temporal_heads,
+                "temporal_layers": args.temporal_layers,
+                "feedforward": args.feedforward,
+                "dropout": args.dropout,
+            }
+        ),
         "training": {
             "epochs": args.epochs,
             "batch_size": args.batch_size,
@@ -450,14 +870,14 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
             "minimum_learning_rate": args.minimum_learning_rate,
             "weight_decay": args.weight_decay,
             "label_smoothing": args.label_smoothing,
-            "early_stopping_patience": args.early_stopping_patience,
             "gradient_clip_norm": args.gradient_clip_norm,
             "num_workers": args.num_workers,
             "pin_memory": not args.no_pin_memory,
             "deterministic": not args.non_deterministic,
             "device": args.device,
         },
-        "selection_protocol": "best epoch by source-validation Macro-F1, accuracy tie-break; target evaluated once",
+        "split_protocol": "14-source-subject train / 1-target-subject test",
+        "selection_protocol": "fixed epoch count; target evaluated only after training",
     }
     run_name = args.run_name or f"{args.feature}_{_settings_hash(settings)}"
     output_root = Path(args.output_root).expanduser().resolve() if args.output_root else ROOT / "runs" / "seediv" / "de_rjsd_ica"
@@ -473,69 +893,124 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
         write_json(settings_path, settings)
         write_json(run_root / "environment.json", environment_manifest(sys.argv))
         write_json(run_root / "data_validation.json", validation)
+        if args.config:
+            shutil.copyfile(Path(args.config), run_root / "input_config.yaml")
+
+    run_log = run_root / "run.log"
+    if not any(
+        isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == run_log
+        for handler in LOGGER.handlers
+    ):
+        file_handler = logging.FileHandler(run_log, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        LOGGER.addHandler(file_handler)
 
     device = select_device(args.device)
     LOGGER.info("Device: %s", device)
     training = dict(settings["training"])
     model_config = dict(settings["model"])
-    model_config.pop("name")
-    completed_rows: list[dict[str, Any]] = []
+    completed_results: list[dict[str, Any]] = []
 
     for target in folds:
         fold_name = f"fold-{target:02d}"
         manifest = read_json(root / "folds" / fold_name / "manifest.json")
         groups = manifest["groups"]
+        source_entries = sorted(
+            list(groups["train"]) + list(groups["validation"]),
+            key=lambda entry: int(entry["source_index"]),
+        )
+        test_entries = list(groups["test"])
+        source_subjects = sorted({int(entry["subject"]) for entry in source_entries})
+        if len(source_entries) != 1008 or len(source_subjects) != 14:
+            raise RuntimeError(f"Fold {target:02d} does not contain 14 complete source subjects")
+        if len(test_entries) != 72 or {int(entry["subject"]) for entry in test_entries} != {target}:
+            raise RuntimeError(f"Fold {target:02d} target split is invalid")
+
         de_mean: np.ndarray | None = None
         de_std: np.ndarray | None = None
-        if args.feature in {"cmrd", "fusion"}:
-            stats_path = run_root / "folds" / fold_name / "source_train_de_stats.npz"
+        reference: np.ndarray | None = None
+        source_window_count = 0
+        if args.feature in {"rjsd", "cmrd", "fusion"}:
+            stats_path = run_root / "folds" / fold_name / "all_source_statistics.npz"
             stats_path.parent.mkdir(parents=True, exist_ok=True)
             if stats_path.is_file():
                 with np.load(stats_path, allow_pickle=False) as archive:
-                    de_mean = np.asarray(archive["mean"], dtype=np.float32)
-                    de_std = np.asarray(archive["std"], dtype=np.float32)
+                    de_mean = np.asarray(archive["de_mean"], dtype=np.float32)
+                    de_std = np.asarray(archive["de_std"], dtype=np.float32)
+                    reference = np.asarray(archive["rjsd_reference"], dtype=np.float32)
+                    source_window_count = int(archive["source_window_count"])
+                    cached_subjects = list(map(int, archive["source_subjects"]))
+                if cached_subjects != source_subjects:
+                    raise RuntimeError(f"Fold {target:02d} all-source statistics subject mismatch")
+                LOGGER.info("Fold %02d: reusing all-source DE/RJSD statistics", target)
             else:
-                LOGGER.info("Fold %02d: fitting source-training zDE statistics", target)
-                de_mean, de_std, count = _fit_de_stats(root, groups["train"])
-                np.savez_compressed(stats_path, mean=de_mean, std=de_std, windows=np.int64(count))
+                shared_path = (
+                    ALL_SOURCE_STATS_ROOT
+                    / validation["preprocessing_signature"]
+                    / f"fold-{target:02d}.npz"
+                )
+                if shared_path.is_file():
+                    with np.load(shared_path, allow_pickle=False) as archive:
+                        de_mean = np.asarray(archive["de_mean"], dtype=np.float32)
+                        de_std = np.asarray(archive["de_std"], dtype=np.float32)
+                        reference = np.asarray(archive["rjsd_reference"], dtype=np.float32)
+                        source_window_count = int(archive["source_window_count"])
+                        cached_subjects = list(map(int, archive["source_subjects"]))
+                    if cached_subjects != source_subjects:
+                        raise RuntimeError(f"Shared fold {target:02d} statistics subject mismatch")
+                    LOGGER.info("Fold %02d: importing verified all-source statistics cache", target)
+                else:
+                    LOGGER.info("Fold %02d: fitting all-source DE/RJSD statistics", target)
+                    de_mean, de_std, reference, source_window_count = _fit_all_source_statistics(root, source_entries)
+                np.savez_compressed(
+                    stats_path,
+                    de_mean=de_mean,
+                    de_std=de_std,
+                    rjsd_reference=reference,
+                    source_window_count=np.int64(source_window_count),
+                    source_subjects=np.asarray(source_subjects, dtype=np.int64),
+                    preprocessing_signature=np.asarray(validation["preprocessing_signature"]),
+                )
+            if args.feature == "rjsd":
+                de_mean = de_std = None
 
         pending_seeds = []
         for seed in seeds:
             result_path = run_root / "folds" / fold_name / f"seed-{seed}" / "result.json"
             if args.resume and result_path.is_file():
                 LOGGER.info("Fold %02d seed %d: reusing completed result", target, seed)
-                completed_rows.append(_flatten_result(read_json(result_path)))
+                completed_results.append(read_json(result_path))
             else:
                 pending_seeds.append(seed)
         if not pending_seeds:
             continue
 
-        LOGGER.info("Fold %02d: loading train/validation/test trials", target)
-        train_samples = _load_samples(root, groups["train"], args.feature, de_mean, de_std, args.alpha)
-        validation_samples = _load_samples(root, groups["validation"], args.feature, de_mean, de_std, args.alpha)
-        test_samples = _load_samples(root, groups["test"], args.feature, de_mean, de_std, args.alpha)
+        LOGGER.info("Fold %02d: loading 14-source train and 1-target test trials", target)
+        train_samples = _load_samples(
+            root, source_entries, args.feature, de_mean, de_std, args.alpha, reference=reference
+        )
+        test_samples = _load_samples(
+            root, test_entries, args.feature, de_mean, de_std, args.alpha, reference=reference
+        )
         LOGGER.info(
-            "Fold %02d: trials=%d/%d/%d input_dim=%d windows=%d..%d",
+            "Fold %02d: train/test trials=%d/%d subjects=14/1 input_dim=%d windows=%d..%d",
             target,
             len(train_samples),
-            len(validation_samples),
             len(test_samples),
             train_samples[0].x.shape[1],
-            min(sample.x.shape[0] for sample in train_samples + validation_samples + test_samples),
-            max(sample.x.shape[0] for sample in train_samples + validation_samples + test_samples),
+            min(sample.x.shape[0] for sample in train_samples + test_samples),
+            max(sample.x.shape[0] for sample in train_samples + test_samples),
         )
         for seed in pending_seeds:
             output_dir = run_root / "folds" / fold_name / f"seed-{seed}"
             if output_dir.exists():
                 shutil.rmtree(output_dir)
             LOGGER.info("Fold %02d seed %d: training", target, seed)
-            result = train_once(
+            result = _train_all_source_once(
                 train_samples=train_samples,
-                validation_samples=validation_samples,
                 test_samples=test_samples,
                 model_config=model_config,
                 training=training,
-                classes=EXPECTED_CLASSES,
                 seed=seed,
                 device=device,
                 output_dir=output_dir,
@@ -545,12 +1020,17 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
                     "target_subject": target,
                     "preprocessing_signature": validation["preprocessing_signature"],
                     "alpha": args.alpha,
-                    "split": manifest["split"],
+                    "split": {
+                        "protocol": "14-source-train/1-target-test",
+                        "train_subjects": source_subjects,
+                        "target_subject": target,
+                    },
+                    "source_train_windows": source_window_count,
                     "target_selection_used": False,
                 },
             )
+            completed_results.append(result)
             row = _flatten_result(result)
-            completed_rows.append(row)
             LOGGER.info(
                 "Fold %02d seed %d complete: test ACC=%.4f Macro-F1=%.4f",
                 target,
@@ -558,24 +1038,36 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
                 row["test_accuracy"],
                 row["test_macro_f1"],
             )
-            ordered = sorted(completed_rows, key=lambda item: (item["target_subject"], item["seed"]))
-            _write_csv(run_root / "fold_results.csv", ordered)
-            write_json(run_root / "summary.json", _aggregate(ordered))
+            _write_run_results(run_root, completed_results)
 
+    if completed_results:
+        _write_run_results(run_root, completed_results)
     return run_root
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Train a leakage-safe SEED-IV LOSO Transformer from the ICA-cleaned DE+RJSD cache. "
-            "The default CMRD feature is tanh(alpha * source-train zDE) * RJSD."
+            "Train SEED-IV LOSO with all 14 non-target subjects as source training data and one target test subject. "
+            "The target is evaluated only after the fixed epoch count completes."
         )
     )
+    parser.add_argument("--config", help="YAML experiment config; explicit CLI arguments override it")
     parser.add_argument("--data-root", help="Signature cache directory, or its de_rjsd_ica_1s_hop05 parent")
     parser.add_argument("--output-root", help="Training output parent (default: runs/seediv/de_rjsd_ica)")
     parser.add_argument("--run-name", help="Stable output directory name; defaults to a settings hash")
-    parser.add_argument("--feature", choices=FEATURES, default="cmrd")
+    parser.add_argument(
+        "--feature",
+        type=_feature_name,
+        choices=FEATURES,
+        default="cmrd",
+        metavar="{CMRD,RJSD,DE,FUSION}",
+        help=(
+            "Training feature (case-insensitive): CMRD=tanh(alpha*zDE)*RJSD; "
+            "RJSD=fold-specific divergence; DE=band log-power; "
+            "FUSION=concat(RJSD, CMRD, zDE). Default: CMRD"
+        ),
+    )
     parser.add_argument("--alpha", type=float, default=0.5, help="CMRD tanh gate strength")
     parser.add_argument("--fold", type=int, nargs="+", help="Target subject(s), default: all 1..15")
     parser.add_argument("--seed", type=int, nargs="+", default=[42])
@@ -590,26 +1082,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-learning-rate", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
-    parser.add_argument("--early-stopping-patience", type=int, default=15)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0, help="0 is the safest choice on Windows")
     parser.add_argument("--no-pin-memory", action="store_true")
     parser.add_argument("--non-deterministic", action="store_true", help="Allow faster non-deterministic CUDA kernels")
 
+    parser.add_argument(
+        "--model",
+        choices=MODELS,
+        default="plain_transformer",
+        help="Model architecture; use hierarchical_attention for band/channel/temporal attention",
+    )
     parser.add_argument("--d-model", type=int, default=600)
     parser.add_argument("--nhead", type=int, default=6)
     parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--channel-heads", type=int, default=4)
+    parser.add_argument("--temporal-heads", type=int, default=4)
+    parser.add_argument("--temporal-layers", type=int, default=3)
     parser.add_argument("--feedforward", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.2)
     return parser
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parse_args_with_config()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     root = _resolve_data_root(args.data_root)
     LOGGER.info("Data root: %s", root)
     validation = validate_cache(root, deep=args.deep_validate)
+    LOGGER.info("Selected training feature: %s", args.feature.upper())
     LOGGER.info(
         "Cache valid: trials=%d folds=%d labels=%s windows=%d..%d",
         validation["trials"],

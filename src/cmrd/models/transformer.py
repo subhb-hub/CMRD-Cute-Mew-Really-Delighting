@@ -35,7 +35,14 @@ class PlainTransformer(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=layers, enable_nested_tensor=False)
-        self.classifier = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, classes))
+        # Match the classifier used by the original high-performing baseline:
+        # a wide nonlinear head rather than a single normalized linear layer.
+        self.classifier = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, classes),
+        )
 
     def forward(self, data: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         if data.ndim != 3 or mask.shape != data.shape[:2]:
@@ -45,4 +52,3 @@ class PlainTransformer(nn.Module):
         weights = mask.unsqueeze(-1).to(encoded.dtype)
         pooled = (encoded * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
         return self.classifier(pooled)
-

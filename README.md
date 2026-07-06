@@ -100,6 +100,34 @@ python scripts/preprocess_seed_de_rjsd_ica.py --stage all --strict-ica --resume
 Its generated data are placed under
 `../Dataset/Processed/CMRD/seed/de_rjsd_ica_1s_hop05/<signature>/`.
 
+For 4 s windows with a 1 s hop, use the matching entry point:
+
+```powershell
+python scripts/preprocess_seediv_de_rjsd_ica_4s_hop1.py --stage all --strict-ica --resume
+# Or, for SEED:
+python scripts/preprocess_seed_de_rjsd_ica_4s_hop1.py --stage all --strict-ica --resume
+```
+
+These scripts store ICA-cleaned continuous trials in the window-independent
+`../Dataset/Processed/CMRD/<dataset>/ica_cleaned/<cleaning-signature>/` cache.
+Later window configurations reuse that cache and only repeat feature windowing.
+The older `de_rjsd_ica_1s_hop05` archives contain only windowed `de` and
+`p_hist`, so they cannot seed this cache; the first run after this change must
+perform ICA once. Use `--force` to rebuild windowed features while retaining
+the ICA cache, or `--force-ica` to rebuild both.
+
+Train the completed SEED-IV 4s/1s cache with the matching entry point:
+
+```powershell
+python scripts/train_seediv_de_rjsd_ica_4s_hop1.py --validate-only
+python scripts/train_seediv_de_rjsd_ica_4s_hop1.py --feature CMRD --fold 1 --resume
+```
+
+For epoch-by-epoch diagnostic target monitoring, open
+`notebooks/seediv_feature_tuning_4s_hop1_monitor.ipynb`. Its outputs and shared
+source-statistics cache are isolated under the `seediv_feature_tuning_4s_hop1`
+diagnostic directory.
+
 `--resume` reuses complete cache/job artifacts, while `--force` explicitly
 recomputes them. Formal `final` training requires a completed source-only tuning
 selection for every requested fold.

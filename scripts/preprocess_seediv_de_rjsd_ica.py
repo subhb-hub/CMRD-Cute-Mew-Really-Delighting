@@ -43,11 +43,33 @@ HOP_SECONDS = 0.5
 NOTCH_HZ = 50.0
 BROAD_BAND_HZ = (1.0, 75.0)
 HIST_BINS_PER_BAND = 32
-SPECTRAL_NFFT = 512
+MIN_SPECTRAL_NFFT = 512
 EPS = 1e-12
 
 
+def _spectral_nfft(window_seconds: float) -> int:
+    """Keep the old 512-point FFT and grow to the next power of two when needed."""
+    window_samples = int(round(window_seconds * SAMPLING_RATE))
+    if window_samples <= 0:
+        raise ValueError("window_seconds must produce at least one sample")
+    return max(MIN_SPECTRAL_NFFT, 1 << (window_samples - 1).bit_length())
+
+
+def _window_tag(value: float) -> str:
+    text = f"{value:g}"
+    return text.replace(".", "")
+
+
+def _output_family(window_seconds: float, hop_seconds: float) -> str:
+    return f"de_rjsd_ica_{_window_tag(window_seconds)}s_hop{_window_tag(hop_seconds)}"
+
+
 def _signature_payload(args: argparse.Namespace, config: ExperimentConfig, channel_names: list[str]) -> dict[str, Any]:
+    window_seconds = float(args.window_seconds)
+    hop_seconds = float(args.hop_seconds)
+    if window_seconds <= 0 or hop_seconds <= 0:
+        raise ValueError("window_seconds and hop_seconds must be positive")
+    spectral_nfft = _spectral_nfft(window_seconds)
     dataset_name = "SEED-IV" if config.dataset == "seediv" else "SEED"
     return {
         "schema_version": 1,
@@ -72,13 +94,13 @@ def _signature_payload(args: argparse.Namespace, config: ExperimentConfig, chann
             "strict_detection": args.strict_ica,
             "bad_channel_std_ratio": args.bad_channel_std_ratio,
         },
-        "window_seconds": WINDOW_SECONDS,
-        "hop_seconds": HOP_SECONDS,
+        "window_seconds": window_seconds,
+        "hop_seconds": hop_seconds,
         "welch": {
             "window": "hann",
-            "nperseg": int(SAMPLING_RATE * WINDOW_SECONDS),
+            "nperseg": int(round(SAMPLING_RATE * window_seconds)),
             "noverlap": 0,
-            "nfft": SPECTRAL_NFFT,
+            "nfft": spectral_nfft,
             "detrend": "constant",
             "scaling": "density",
         },
@@ -95,6 +117,31 @@ def _signature_payload(args: argparse.Namespace, config: ExperimentConfig, chann
             "reference_source": "source_train_only",
         },
         "mne_version": mne.__version__,
+    }
+
+
+def _cleaning_signature_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Select only settings that can change the ICA-cleaned continuous signal."""
+    keys = (
+        "dataset",
+        "raw_dir",
+        "channels",
+        "channel_names",
+        "sampling_rate",
+        "input_unit",
+        "mne_internal_unit",
+        "notch_hz",
+        "ica_highpass_hz",
+        "final_bandpass_hz",
+        "ica",
+        "mne_version",
+        "official_upstream_preprocessing",
+        "montage_source",
+        "channel_order_verification",
+    )
+    return {
+        "schema_version": 1,
+        **{key: payload[key] for key in keys if key in payload},
     }
 
 
@@ -228,9 +275,16 @@ def clean_signal_with_mne(
     return cleaned_microvolt, metadata
 
 
-def extract_de_and_phist(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    window_size = int(round(WINDOW_SECONDS * SAMPLING_RATE))
-    hop_size = int(round(HOP_SECONDS * SAMPLING_RATE))
+def extract_de_and_phist(
+    signal: np.ndarray,
+    window_seconds: float = WINDOW_SECONDS,
+    hop_seconds: float = HOP_SECONDS,
+) -> tuple[np.ndarray, np.ndarray]:
+    window_size = int(round(window_seconds * SAMPLING_RATE))
+    hop_size = int(round(hop_seconds * SAMPLING_RATE))
+    if window_size <= 0 or hop_size <= 0:
+        raise ValueError("window_seconds and hop_seconds must be positive")
+    spectral_nfft = _spectral_nfft(window_seconds)
     starts = np.arange(0, signal.shape[-1] - window_size + 1, hop_size, dtype=np.int64)
     if starts.size == 0:
         raise ValueError(f"Signal with {signal.shape[-1]} samples is shorter than one window")
@@ -247,7 +301,7 @@ def extract_de_and_phist(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             window="hann",
             nperseg=window_size,
             noverlap=0,
-            nfft=SPECTRAL_NFFT,
+            nfft=spectral_nfft,
             detrend="constant",
             scaling="density",
             axis=-1,
@@ -277,6 +331,71 @@ def extract_de_and_phist(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if not np.isfinite(de).all() or not np.isfinite(p_hist).all():
         raise FloatingPointError("DE/p_hist extraction produced non-finite values")
     return de, p_hist
+
+
+def _valid_cleaned_file(path: Path, cleaning_signature: str, channels: int) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            cleaned = archive["cleaned"]
+            return (
+                str(archive["cleaning_signature"].item()) == cleaning_signature
+                and "ica_metadata_json" in archive
+                and cleaned.ndim == 2
+                and cleaned.shape[0] == channels
+                and cleaned.shape[1] > 0
+            )
+    except (KeyError, OSError, ValueError):
+        return False
+
+
+def _load_or_build_cleaned_signal(
+    record: Any,
+    cache_root: Path,
+    cleaning_signature: str,
+    channel_names: list[str],
+    montage: mne.channels.DigMontage,
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, dict[str, Any], bool]:
+    signal_path = cache_root / "trials" / f"{record.trial_id}.npz"
+    metadata_path = cache_root / "trial_metadata" / f"{record.trial_id}.json"
+    reusable = (
+        args.reuse_ica_cache
+        and not args.force_ica
+        and _valid_cleaned_file(signal_path, cleaning_signature, len(channel_names))
+    )
+    if reusable:
+        with np.load(signal_path, allow_pickle=False) as archive:
+            cleaned = np.asarray(archive["cleaned"], dtype=np.float32)
+            ica_metadata = json.loads(str(archive["ica_metadata_json"].item()))
+        if not np.isfinite(cleaned).all():
+            raise FloatingPointError(f"Cached ICA signal contains NaN or infinite values: {signal_path}")
+        return cleaned, ica_metadata, True
+
+    cleaned, ica_metadata = clean_signal_with_mne(record.signal, channel_names, montage, args)
+    write_npz(
+        signal_path,
+        cleaned=cleaned.astype(np.float32),
+        label=np.int64(record.label),
+        subject=np.int64(record.subject),
+        session=np.int64(record.session),
+        trial=np.int64(record.trial),
+        cleaning_signature=np.asarray(cleaning_signature),
+        ica_metadata_json=np.asarray(json.dumps(ica_metadata, sort_keys=True, separators=(",", ":"))),
+    )
+    write_json(
+        metadata_path,
+        {
+            "trial_id": record.trial_id,
+            "source_file": record.source_file,
+            "source_key": record.source_key,
+            "cleaned_shape": list(cleaned.shape),
+            "cleaning_signature": cleaning_signature,
+            "ica": ica_metadata,
+        },
+    )
+    return cleaned, ica_metadata, False
 
 
 def _valid_trial_file(path: Path, signature: str) -> bool:
@@ -325,6 +444,8 @@ def build_trial_features(
     root: Path,
     signature: str,
     signature_payload: dict[str, Any],
+    ica_cache_root: Path,
+    cleaning_signature: str,
     montage: mne.channels.DigMontage,
     channel_names: list[str],
     args: argparse.Namespace,
@@ -343,9 +464,23 @@ def build_trial_features(
         try:
             reusable = args.resume and not args.force and _valid_trial_file(trial_path, signature) and metadata_path.is_file()
             if not reusable:
-                LOGGER.info("Cleaning %s from %s:%s", record.trial_id, Path(record.source_file).name, record.source_key)
-                cleaned, ica_metadata = clean_signal_with_mne(record.signal, channel_names, montage, args)
-                de, p_hist = extract_de_and_phist(cleaned)
+                cleaned, ica_metadata, reused_cleaned = _load_or_build_cleaned_signal(
+                    record,
+                    ica_cache_root,
+                    cleaning_signature,
+                    channel_names,
+                    montage,
+                    args,
+                )
+                if reused_cleaned:
+                    LOGGER.info("Reusing ICA-cleaned signal for %s", record.trial_id)
+                else:
+                    LOGGER.info("Cached newly ICA-cleaned signal for %s", record.trial_id)
+                de, p_hist = extract_de_and_phist(
+                    cleaned,
+                    window_seconds=float(args.window_seconds),
+                    hop_seconds=float(args.hop_seconds),
+                )
                 write_npz(
                     trial_path,
                     de=de.astype(np.float32),
@@ -364,6 +499,8 @@ def build_trial_features(
                         "source_file": record.source_file,
                         "source_key": record.source_key,
                         "ica": ica_metadata,
+                        "ica_cache_path": str(ica_cache_root / "trials" / f"{record.trial_id}.npz"),
+                        "cleaning_signature": cleaning_signature,
                         "de_shape": list(de.shape),
                         "p_hist_shape": list(p_hist.shape),
                     },
@@ -577,9 +714,12 @@ def build_folds(
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(
+    default_window_seconds: float = WINDOW_SECONDS,
+    default_hop_seconds: float = HOP_SECONDS,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SEED-IV DE+RJSD preprocessing with 50 Hz notch, ICA artifact removal, 1-75 Hz band-pass, and strict fold provenance."
+        description="SEED-IV DE+RJSD preprocessing with reusable ICA-cleaned time-series, 1-75 Hz band-pass, and strict fold provenance."
     )
     parser.add_argument("--config", default="configs/seediv/rd.yaml")
     parser.add_argument("--output-root", default=None, help="Parent output directory; a signature subdirectory is added")
@@ -590,6 +730,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true", help="Recompute existing matching trial/fold files")
     parser.add_argument("--max-trials", type=int, default=None, help="Diagnostic trial-stage limit; produces an incomplete manifest")
     parser.add_argument("--continue-on-error", action="store_true", help="Record failed trials and continue; folds remain blocked")
+    parser.add_argument("--window-seconds", type=float, default=default_window_seconds)
+    parser.add_argument("--hop-seconds", type=float, default=default_hop_seconds)
+    parser.add_argument(
+        "--ica-cache-root",
+        default=None,
+        help="ICA cache parent; defaults to <processed>/<dataset>/ica_cleaned (a cleaning signature is added)",
+    )
+    parser.add_argument(
+        "--reuse-ica-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse matching ICA-cleaned continuous signals when available",
+    )
+    parser.add_argument("--force-ica", action="store_true", help="Recompute ICA even when a matching time-series cache exists")
     parser.add_argument("--strict-ica", action="store_true", help="Abort if EOG or muscle component detection fails")
     parser.add_argument(
         "--bad-channel-std-ratio",
@@ -606,8 +760,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(
+    default_window_seconds: float = WINDOW_SECONDS,
+    default_hop_seconds: float = HOP_SECONDS,
+) -> None:
+    args = build_parser(default_window_seconds, default_hop_seconds).parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     mne.set_log_level(args.mne_log_level)
     config = load_config(args.config, expected_feature="rd")
@@ -627,13 +784,22 @@ def main() -> None:
 
     payload = _signature_payload(args, config, channel_names)
     signature = _signature(payload)
+    cleaning_payload = _cleaning_signature_payload(payload)
+    cleaning_signature = _signature(cleaning_payload)
     output_parent = (
         Path(args.output_root).expanduser().resolve()
         if args.output_root
-        else config.processed_root / "seediv" / "de_rjsd_ica_1s_hop05"
+        else config.processed_root / "seediv" / _output_family(args.window_seconds, args.hop_seconds)
     )
     output_root = output_parent / signature
     output_root.mkdir(parents=True, exist_ok=True)
+    ica_cache_parent = (
+        Path(args.ica_cache_root).expanduser().resolve()
+        if args.ica_cache_root
+        else config.processed_root / "seediv" / "ica_cleaned"
+    )
+    ica_cache_root = ica_cache_parent / cleaning_signature
+    ica_cache_root.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(output_root / "preprocessing.log", encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     LOGGER.addHandler(file_handler)
@@ -649,13 +815,39 @@ def main() -> None:
             "channel_locs": str(locs_path),
             "preprocessing_signature": signature,
             "signature_payload": payload,
+            "cleaning_signature": cleaning_signature,
+            "cleaning_signature_payload": cleaning_payload,
+            "ica_cache_root": str(ica_cache_root),
+        },
+    )
+    write_json(
+        ica_cache_root / "cache_manifest.json",
+        {
+            "schema_version": 1,
+            "dataset": "SEED-IV",
+            "cleaning_signature": cleaning_signature,
+            "cleaning_signature_payload": cleaning_payload,
+            "signal_shape": "[62,samples]",
+            "signal_unit": "microvolt",
+            "storage_dtype": "float32",
         },
     )
     LOGGER.info("Output root: %s", output_root)
     LOGGER.info("Preprocessing signature: %s", signature)
+    LOGGER.info("ICA time-series cache: %s", ica_cache_root)
 
     if args.stage in {"all", "trials"}:
-        build_trial_features(config, output_root, signature, payload, montage, channel_names, args)
+        build_trial_features(
+            config,
+            output_root,
+            signature,
+            payload,
+            ica_cache_root,
+            cleaning_signature,
+            montage,
+            channel_names,
+            args,
+        )
     if args.stage in {"all", "folds"}:
         if args.max_trials is not None:
             raise ValueError("--max-trials is diagnostic-only and cannot be combined with the folds stage")

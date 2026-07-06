@@ -1,0 +1,46 @@
+# Formal SEED-IV LOSO experiment using the notebook-selected hierarchy.
+# Run from the repository root with:
+#   python scripts/train_seediv_de_rjsd_ica.py --config configs/seediv/hierarchical_attention_rjsd.yaml
+
+paths:
+  # null lets the script auto-discover the newest complete 1 s / 0.5 s cache.
+  data_root: null
+  # null uses runs/seediv/de_rjsd_ica.
+  output_root: null
+
+experiment:
+  run_name: rjsd_hierattn_d64_l3_seed42
+  feature: rjsd
+  # Used only for CMRD or FUSION.
+  alpha: 0.5
+  # null runs all target subjects 1..15. For a smoke test use: [1]
+  folds: null
+  # For a multi-seed report use: [42, 3407, 2026]
+  seeds: [42]
+
+model:
+  name: hierarchical_attention
+  d_model: 64
+  channel_heads: 4
+  temporal_heads: 4
+  temporal_layers: 3
+  feedforward: 256
+  dropout: 0.2
+
+training:
+  epochs: 60
+  batch_size: 16
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  label_smoothing: 0.2
+  gradient_clip_norm: 1.0
+
+runtime:
+  device: auto
+  num_workers: 0
+  pin_memory: true
+  deterministic: true
+  resume: true
+  validate_only: false
+  deep_validate: false

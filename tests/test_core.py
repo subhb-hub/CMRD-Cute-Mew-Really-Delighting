@@ -88,7 +88,15 @@ class CoreTests(unittest.TestCase):
             second = model(changed, mask)
         torch.testing.assert_close(first, second)
 
+    def test_transformer_uses_legacy_wide_classifier_head(self) -> None:
+        model = PlainTransformer(6, 3, 5, 8, 2, 1, 16, 0.2)
+        self.assertIsInstance(model.classifier[0], torch.nn.Linear)
+        self.assertEqual((model.classifier[0].in_features, model.classifier[0].out_features), (8, 32))
+        self.assertIsInstance(model.classifier[1], torch.nn.ReLU)
+        self.assertIsInstance(model.classifier[2], torch.nn.Dropout)
+        self.assertIsInstance(model.classifier[3], torch.nn.Linear)
+        self.assertEqual((model.classifier[3].in_features, model.classifier[3].out_features), (32, 3))
+
 
 if __name__ == "__main__":
     unittest.main()
-

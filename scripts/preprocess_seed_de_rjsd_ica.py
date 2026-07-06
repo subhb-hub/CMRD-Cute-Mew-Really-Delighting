@@ -19,6 +19,10 @@ from cmrd.config import load_config
 from cmrd.io import write_json
 
 from preprocess_seediv_de_rjsd_ica import (
+    HOP_SECONDS,
+    WINDOW_SECONDS,
+    _cleaning_signature_payload,
+    _output_family,
     _signature,
     _signature_payload,
     build_folds,
@@ -67,8 +71,11 @@ def _resolve_montage_and_verify_order(config, supplied: str | None) -> tuple[Pat
     return locs_path, hashes
 
 
-def build_parser():
-    parser = _shared_parser()
+def build_parser(
+    default_window_seconds: float = WINDOW_SECONDS,
+    default_hop_seconds: float = HOP_SECONDS,
+):
+    parser = _shared_parser(default_window_seconds, default_hop_seconds)
     parser.description = (
         "SEED DE+RJSD preprocessing from official Preprocessed_EEG: preserve the official 200 Hz/trial cuts, "
         "then add 50 Hz notch, ICA artifact removal, final 1-75 Hz filtering, and strict fold provenance."
@@ -81,8 +88,11 @@ def build_parser():
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(
+    default_window_seconds: float = WINDOW_SECONDS,
+    default_hop_seconds: float = HOP_SECONDS,
+) -> None:
+    args = build_parser(default_window_seconds, default_hop_seconds).parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     mne.set_log_level(args.mne_log_level)
     config = load_config(args.config, expected_feature="rd")
@@ -108,14 +118,23 @@ def main() -> None:
     payload["montage_source"] = str(locs_path)
     payload["channel_order_verification"] = order_hashes
     signature = _signature(payload)
+    cleaning_payload = _cleaning_signature_payload(payload)
+    cleaning_signature = _signature(cleaning_payload)
 
     output_parent = (
         Path(args.output_root).expanduser().resolve()
         if args.output_root
-        else config.processed_root / "seed" / "de_rjsd_ica_1s_hop05"
+        else config.processed_root / "seed" / _output_family(args.window_seconds, args.hop_seconds)
     )
     output_root = output_parent / signature
     output_root.mkdir(parents=True, exist_ok=True)
+    ica_cache_parent = (
+        Path(args.ica_cache_root).expanduser().resolve()
+        if args.ica_cache_root
+        else config.processed_root / "seed" / "ica_cleaned"
+    )
+    ica_cache_root = ica_cache_parent / cleaning_signature
+    ica_cache_root.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(output_root / "preprocessing.log", encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     LOGGER.addHandler(file_handler)
@@ -134,14 +153,40 @@ def main() -> None:
             "channel_order_verification": order_hashes,
             "preprocessing_signature": signature,
             "signature_payload": payload,
+            "cleaning_signature": cleaning_signature,
+            "cleaning_signature_payload": cleaning_payload,
+            "ica_cache_root": str(ica_cache_root),
+        },
+    )
+    write_json(
+        ica_cache_root / "cache_manifest.json",
+        {
+            "schema_version": 1,
+            "dataset": "SEED",
+            "cleaning_signature": cleaning_signature,
+            "cleaning_signature_payload": cleaning_payload,
+            "signal_shape": "[62,samples]",
+            "signal_unit": "microvolt",
+            "storage_dtype": "float32",
         },
     )
     LOGGER.info("Output root: %s", output_root)
     LOGGER.info("Preprocessing signature: %s", signature)
+    LOGGER.info("ICA time-series cache: %s", ica_cache_root)
     LOGGER.info("Using official SEED 200 Hz, 0-75 Hz, movie-trial input without resampling")
 
     if args.stage in {"all", "trials"}:
-        build_trial_features(config, output_root, signature, payload, montage, channel_names, args)
+        build_trial_features(
+            config,
+            output_root,
+            signature,
+            payload,
+            ica_cache_root,
+            cleaning_signature,
+            montage,
+            channel_names,
+            args,
+        )
     if args.stage in {"all", "folds"}:
         if args.max_trials is not None:
             raise ValueError("--max-trials is diagnostic-only and cannot be combined with the folds stage")
