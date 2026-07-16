@@ -36,13 +36,20 @@ from cmrd.training.runtime import environment_manifest, seed_everything, select_
 LOGGER = logging.getLogger("seediv.cmrd_ica.train")
 FEATURES = ("cmrd", "de", "rjsd", "fusion")
 MODELS = ("plain_transformer", "hierarchical_attention")
-EXPECTED_TRIALS = 15 * 3 * 24
+DATASET_NAME = "SEED-IV"
+EXPECTED_SUBJECTS = 15
+EXPECTED_CLASSES = 4
+EXPECTED_TRIALS_PER_SUBJECT = 72
+EXPECTED_TRIALS = EXPECTED_SUBJECTS * EXPECTED_TRIALS_PER_SUBJECT
+EXPECTED_GROUP_SIZES = {"train": 864, "validation": 144, "test": 72}
+EXPECTED_SOURCE_TRIALS = 1008
+EXPECTED_TARGET_TRIALS = 72
 EXPECTED_CHANNELS = 62
 EXPECTED_BANDS = 5
-EXPECTED_CLASSES = 4
 DEFAULT_DATA_PARENT = (
     ROOT.parent / "Dataset" / "Processed" / "CMRD" / "seediv" / "de_rjsd_ica_1s_hop05"
 )
+DEFAULT_OUTPUT_ROOT = ROOT / "runs" / "seediv" / "de_rjsd_ica"
 ALL_SOURCE_STATS_ROOT = (
     ROOT / "runs" / "diagnostics" / "seediv_feature_tuning" / "_all_source_statistics"
 )
@@ -72,6 +79,7 @@ CONFIG_FIELDS = {
     },
     "training": {
         "epochs": "epochs",
+        "evaluation_interval": "evaluation_interval",
         "batch_size": "batch_size",
         "learning_rate": "learning_rate",
         "minimum_learning_rate": "minimum_learning_rate",
@@ -184,7 +192,7 @@ def _resolve_data_root(value: str | None) -> Path:
     ]
     if not complete:
         raise FileNotFoundError(
-            f"No complete SEED-IV DE+RJSD cache found under {requested}. "
+            f"No complete {DATASET_NAME} DE+RJSD cache found under {requested}. "
             "Pass --data-root as the signature directory or its parent."
         )
     if len(complete) > 1 and value is None:
@@ -224,8 +232,8 @@ def _check_entry_archive(
 def validate_cache(root: Path, deep: bool = False) -> dict[str, Any]:
     pipeline = read_json(root / "pipeline_manifest.json")
     signature = str(pipeline.get("preprocessing_signature", ""))
-    if pipeline.get("dataset") != "SEED-IV" or pipeline.get("features") != ["de", "rjsd"]:
-        raise ValueError("pipeline_manifest.json is not the expected SEED-IV DE+RJSD cache")
+    if pipeline.get("dataset") != DATASET_NAME or pipeline.get("features") != ["de", "rjsd"]:
+        raise ValueError(f"pipeline_manifest.json is not the expected {DATASET_NAME} DE+RJSD cache")
     if not pipeline.get("all_15_folds_complete"):
         raise RuntimeError("The preprocessing pipeline does not contain all 15 completed folds")
 
@@ -241,14 +249,19 @@ def validate_cache(root: Path, deep: bool = False) -> dict[str, Any]:
     by_id = {str(entry["trial_id"]): entry for entry in trials}
     if len(by_id) != EXPECTED_TRIALS:
         raise ValueError("Duplicate trial IDs are present")
-    expected_subject_counts = Counter(range(1, 16))
+    expected_subject_counts = Counter(range(1, EXPECTED_SUBJECTS + 1))
     actual_subject_counts = Counter(int(entry["subject"]) for entry in trials)
     if set(actual_subject_counts) != set(expected_subject_counts):
         raise ValueError(f"Unexpected subject IDs: {sorted(actual_subject_counts)}")
-    if any(count != 72 for count in actual_subject_counts.values()):
-        raise ValueError(f"Each subject must have 72 trials: {actual_subject_counts}")
-    if Counter(int(entry["label"]) for entry in trials) != Counter({0: 270, 1: 270, 2: 270, 3: 270}):
-        raise ValueError("Global SEED-IV labels are not balanced 270/270/270/270")
+    if any(count != EXPECTED_TRIALS_PER_SUBJECT for count in actual_subject_counts.values()):
+        raise ValueError(
+            f"Each subject must have {EXPECTED_TRIALS_PER_SUBJECT} trials: {actual_subject_counts}"
+        )
+    expected_labels = Counter({
+        label: EXPECTED_TRIALS // EXPECTED_CLASSES for label in range(EXPECTED_CLASSES)
+    })
+    if Counter(int(entry["label"]) for entry in trials) != expected_labels:
+        raise ValueError(f"Global {DATASET_NAME} labels are not balanced: expected {expected_labels}")
 
     window_counts = []
     for entry in trials:
@@ -261,7 +274,7 @@ def validate_cache(root: Path, deep: bool = False) -> dict[str, Any]:
         window_counts.append(shape[0])
 
     fold_summaries: dict[str, Any] = {}
-    for target in range(1, 16):
+    for target in range(1, EXPECTED_SUBJECTS + 1):
         fold_name = f"fold-{target:02d}"
         fold_root = root / "folds" / fold_name
         manifest = read_json(fold_root / "manifest.json")
@@ -270,7 +283,7 @@ def validate_cache(root: Path, deep: bool = False) -> dict[str, Any]:
         if int(manifest.get("target_subject", -1)) != target:
             raise ValueError(f"{fold_name} has the wrong target subject")
         groups = manifest["groups"]
-        expected_sizes = {"train": 864, "validation": 144, "test": 72}
+        expected_sizes = EXPECTED_GROUP_SIZES
         group_ids: dict[str, set[str]] = {}
         group_subjects: dict[str, set[int]] = {}
         for group_name, expected_size in expected_sizes.items():
@@ -348,7 +361,7 @@ def validate_cache(root: Path, deep: bool = False) -> dict[str, Any]:
             raise ValueError(f"p_hist normalization error is too large: {histogram_sum_error}")
 
         checked_rjsd = 0
-        for target in range(1, 16):
+        for target in range(1, EXPECTED_SUBJECTS + 1):
             manifest = read_json(root / "folds" / f"fold-{target:02d}" / "manifest.json")
             for group_name in ("train", "validation", "test"):
                 for entry in manifest["groups"][group_name]:
@@ -361,7 +374,7 @@ def validate_cache(root: Path, deep: bool = False) -> dict[str, Any]:
                         if np.any(value < -1e-7) or np.any(value > math.log(2.0) + 1e-5):
                             raise ValueError(f"{entry['trial_id']} RJSD falls outside [0, ln(2)]")
                     checked_rjsd += 1
-            LOGGER.info("Deep validation: RJSD folds %d/15", target)
+            LOGGER.info("Deep validation: RJSD folds %d/%d", target, EXPECTED_SUBJECTS)
         deep_stats = {
             "checked_trial_archives": len(trials),
             "checked_rjsd_archives": checked_rjsd,
@@ -606,12 +619,16 @@ def _train_all_source_once(
         weight_decay=float(training["weight_decay"]),
     )
     epochs = int(training["epochs"])
+    evaluation_interval = int(training.get("evaluation_interval", 10))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(epochs, 1),
         eta_min=float(training.get("minimum_learning_rate", 1e-6)),
     )
     history: list[dict[str, Any]] = []
+    evaluation_history: list[dict[str, Any]] = []
+    source_metrics = None
+    test_metrics = None
     started = time.perf_counter()
     log_path = output_dir / "train.log"
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
@@ -664,15 +681,37 @@ def _train_all_source_once(
                 row["train_loss"], row["learning_rate"],
             )
 
-        source_metrics = evaluate(model, source_eval_loader, device, EXPECTED_CLASSES)
-        test_metrics = evaluate(model, test_loader, device, EXPECTED_CLASSES)
-        source_line = _metrics_log("SOURCE", source_metrics)
-        test_line = _metrics_log("TARGET", test_metrics)
-        log.write(source_line + "\n" + test_line + "\n")
-        LOGGER.info(source_line)
-        LOGGER.info(test_line)
+            should_evaluate = epoch == epochs or (
+                evaluation_interval > 0 and epoch % evaluation_interval == 0
+            )
+            if should_evaluate:
+                source_metrics = evaluate(model, source_eval_loader, device, EXPECTED_CLASSES)
+                test_metrics = evaluate(model, test_loader, device, EXPECTED_CLASSES)
+                evaluation_row = {
+                    "epoch": epoch,
+                    "train_loss": row["train_loss"],
+                    "source_accuracy": source_metrics["accuracy"],
+                    "source_balanced_accuracy": source_metrics["balanced_accuracy"],
+                    "source_macro_f1": source_metrics["macro_f1"],
+                    "target_accuracy": test_metrics["accuracy"],
+                    "target_balanced_accuracy": test_metrics["balanced_accuracy"],
+                    "target_macro_f1": test_metrics["macro_f1"],
+                    "elapsed_seconds": time.perf_counter() - started,
+                }
+                evaluation_history.append(evaluation_row)
+                source_line = _metrics_log(f"SOURCE epoch={epoch:03d}", source_metrics)
+                test_line = _metrics_log(f"TARGET epoch={epoch:03d}", test_metrics)
+                log.write(json.dumps(evaluation_row) + "\n")
+                log.write(source_line + "\n" + test_line + "\n")
+                log.flush()
+                LOGGER.info(source_line)
+                LOGGER.info(test_line)
+
+    if source_metrics is None or test_metrics is None:
+        raise RuntimeError("Final source/target evaluation was not produced")
 
     _write_csv(output_dir / "epochs.csv", history)
+    _write_csv(output_dir / "evaluations.csv", evaluation_history)
     checkpoint = {
         "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "normalization_mean": mean,
@@ -699,7 +738,9 @@ def _train_all_source_once(
         "train_trials": len(train_samples),
         "test_trials": len(test_samples),
         "elapsed_seconds": time.perf_counter() - started,
-        "target_evaluated_during_training": False,
+        "target_evaluated_during_training": any(
+            int(row["epoch"]) < epochs for row in evaluation_history
+        ),
     }
     write_json(output_dir / "result.json", result)
     return result
@@ -817,10 +858,10 @@ def _write_run_results(run_root: Path, results: list[dict[str, Any]]) -> None:
 
 
 def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> Path:
-    folds = sorted(set(args.fold or range(1, 16)))
+    folds = sorted(set(args.fold or range(1, EXPECTED_SUBJECTS + 1)))
     seeds = list(dict.fromkeys(args.seed))
-    if any(not 1 <= fold <= 15 for fold in folds):
-        raise ValueError("--fold values must be in 1..15")
+    if any(not 1 <= fold <= EXPECTED_SUBJECTS for fold in folds):
+        raise ValueError(f"--fold values must be in 1..{EXPECTED_SUBJECTS}")
     if args.model == "plain_transformer" and args.d_model % args.nhead:
         raise ValueError("--d-model must be divisible by --nhead")
     if args.model == "hierarchical_attention":
@@ -830,10 +871,12 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
             raise ValueError("--d-model must be divisible by --temporal-heads")
     if args.alpha <= 0:
         raise ValueError("--alpha must be positive")
+    if args.evaluation_interval < 0:
+        raise ValueError("--evaluation-interval must be >= 0")
 
     settings = {
         "schema_version": 1,
-        "dataset": "SEED-IV",
+        "dataset": DATASET_NAME,
         "data_root": str(root),
         "preprocessing_signature": validation["preprocessing_signature"],
         "feature": args.feature,
@@ -865,6 +908,7 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
         ),
         "training": {
             "epochs": args.epochs,
+            "evaluation_interval": args.evaluation_interval,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "minimum_learning_rate": args.minimum_learning_rate,
@@ -877,10 +921,12 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
             "device": args.device,
         },
         "split_protocol": "14-source-subject train / 1-target-subject test",
-        "selection_protocol": "fixed epoch count; target evaluated only after training",
+        "selection_protocol": (
+            "fixed epoch count; periodic source/target monitoring does not alter training or model selection"
+        ),
     }
     run_name = args.run_name or f"{args.feature}_{_settings_hash(settings)}"
-    output_root = Path(args.output_root).expanduser().resolve() if args.output_root else ROOT / "runs" / "seediv" / "de_rjsd_ica"
+    output_root = Path(args.output_root).expanduser().resolve() if args.output_root else DEFAULT_OUTPUT_ROOT
     run_root = output_root / run_name
     settings_path = run_root / "settings.json"
     if settings_path.is_file():
@@ -921,9 +967,9 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
         )
         test_entries = list(groups["test"])
         source_subjects = sorted({int(entry["subject"]) for entry in source_entries})
-        if len(source_entries) != 1008 or len(source_subjects) != 14:
+        if len(source_entries) != EXPECTED_SOURCE_TRIALS or len(source_subjects) != 14:
             raise RuntimeError(f"Fold {target:02d} does not contain 14 complete source subjects")
-        if len(test_entries) != 72 or {int(entry["subject"]) for entry in test_entries} != {target}:
+        if len(test_entries) != EXPECTED_TARGET_TRIALS or {int(entry["subject"]) for entry in test_entries} != {target}:
             raise RuntimeError(f"Fold {target:02d} target split is invalid")
 
         de_mean: np.ndarray | None = None
@@ -1015,7 +1061,7 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
                 device=device,
                 output_dir=output_dir,
                 context={
-                    "dataset": "SEED-IV",
+                    "dataset": DATASET_NAME,
                     "feature": args.feature,
                     "target_subject": target,
                     "preprocessing_signature": validation["preprocessing_signature"],
@@ -1048,7 +1094,7 @@ def train(args: argparse.Namespace, root: Path, validation: dict[str, Any]) -> P
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Train SEED-IV LOSO with all 14 non-target subjects as source training data and one target test subject. "
+            f"Train {DATASET_NAME} LOSO with all 14 non-target subjects as source training data and one target test subject. "
             "The target is evaluated only after the fixed epoch count completes."
         )
     )
@@ -1077,6 +1123,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deep-validate", action="store_true", help="Read and numerically check every NPZ archive")
 
     parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument(
+        "--evaluation-interval",
+        type=int,
+        default=10,
+        help="Evaluate source and target every N epochs; 0 means final epoch only",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--minimum-learning-rate", type=float, default=1e-6)

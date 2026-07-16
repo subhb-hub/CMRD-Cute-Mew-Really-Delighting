@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -18,7 +19,11 @@ from cmrd.io import read_json
 from cmrd.io import write_json, write_npz
 from cmrd.preprocessing import cache_root
 from cmrd.training.artifacts import create_run
-from cmrd.training.engine import train_once
+from cmrd.training.engine import (
+    LegacyDataLoaderRandomSampler,
+    SequenceDataset,
+    train_once,
+)
 from cmrd.training.experiment import run_experiment
 
 
@@ -33,6 +38,46 @@ def samples(subject: int, count: int, seed: int) -> list[TrialSample]:
 
 
 class TrainingTests(unittest.TestCase):
+    def test_cached_normalization_is_identical_to_lazy_normalization(self) -> None:
+        source = samples(1, 7, 9)
+        mean = np.linspace(-0.2, 0.3, 6, dtype=np.float32)
+        std = np.linspace(0.5, 1.5, 6, dtype=np.float32)
+        lazy = SequenceDataset(source, mean, std)
+        cached = SequenceDataset(source, mean, std, cache_normalized=True)
+        self.assertIsNone(cached.samples)
+        for index in range(len(source)):
+            lazy_value, lazy_label = lazy[index]
+            cached_value, cached_label = cached[index]
+            torch.testing.assert_close(cached_value, lazy_value, rtol=0.0, atol=0.0)
+            self.assertEqual(cached_label, lazy_label)
+
+    def test_persistent_worker_sampler_preserves_old_epoch_orders(self) -> None:
+        dataset = TensorDataset(torch.arange(17))
+        old_loader = DataLoader(
+            dataset,
+            batch_size=4,
+            shuffle=True,
+            num_workers=0,
+            generator=torch.Generator().manual_seed(42),
+        )
+        expected = [
+            torch.cat([batch[0] for batch in old_loader]).tolist()
+            for _ in range(4)
+        ]
+        sampler = LegacyDataLoaderRandomSampler(dataset, 42)
+        compatible_loader = DataLoader(
+            dataset,
+            batch_size=4,
+            sampler=sampler,
+            num_workers=0,
+            generator=torch.Generator().manual_seed(1_000_045),
+        )
+        actual = [
+            torch.cat([batch[0] for batch in compatible_loader]).tolist()
+            for _ in range(4)
+        ]
+        self.assertEqual(actual, expected)
+
     def test_one_epoch_writes_metrics_checkpoint_and_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "job"

@@ -119,11 +119,8 @@ class HierarchicalChannelBandTransformer(nn.Module):
         data: torch.Tensor,
         mask: torch.Tensor,
         return_attention: bool = False,
+        valid_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if mask.dtype != torch.bool:
-            raise ValueError(f"mask must be boolean, got {mask.dtype}")
-        if not torch.all(mask.any(dim=1)):
-            raise ValueError("Every sequence must contain at least one valid time step")
         structured = self._structure_input(data, mask)
         batch, time, _, _ = structured.shape
 
@@ -137,7 +134,13 @@ class HierarchicalChannelBandTransformer(nn.Module):
 
         # Only valid windows enter channel MHA, avoiding wasted work on padding.
         flat_channels = channel_tokens.reshape(batch * time, self.channels, self.d_model)
-        valid_indices = mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+        if valid_indices is None:
+            # Compatibility path for direct CPU model calls. Production
+            # loaders compute these indices before moving the mask to CUDA,
+            # avoiding a dynamic-shape GPU nonzero and its synchronization.
+            valid_indices = mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+        elif valid_indices.device != flat_channels.device:
+            raise ValueError("valid_indices must be on the same device as data")
         valid_channels = flat_channels.index_select(0, valid_indices)
         normalized = self.channel_norm1(valid_channels)
         related, _ = self.channel_attention(

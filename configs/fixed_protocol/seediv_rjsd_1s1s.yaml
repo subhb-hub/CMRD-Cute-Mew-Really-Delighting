@@ -1,0 +1,92 @@
+experiment:
+  dataset: seediv
+  feature: rd
+  model: hierarchical_attention
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs/fixed_protocol_seed42
+dataset:
+  raw_dir: Ori/SEED-IV/eeg_raw_data
+  channels: 62
+  subjects: 15
+  classes: 4
+signal:
+  original_rate: 200
+  target_rate: 200
+  broad_band_hz: [1.0, 75.0]
+  filter_order: 4
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 31.0]
+    gamma: [31.0, 50.0]
+feature:
+  name: reference_deviation
+  old_name: rjsd
+  hist_bins_per_band: 32
+  spectral_nfft: 512
+  storage_dtype: float16
+split:
+  protocol: loso
+  validation_subjects: 2
+  seed: 42
+model:
+  d_model: 128
+  nhead: 4
+  layers: 3
+  feedforward: 512
+  dropout: 0.3
+  hidden: 128
+training:
+  seeds: [42]
+  device: auto
+  deterministic: true
+  epochs: 80
+  batch_size: 16
+  learning_rate: 0.0003
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.001
+  label_smoothing: 0.0
+  early_stopping_patience: 12
+  gradient_clip_norm: 1.0
+  num_workers: 0
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: true
+  selection_file: ""
+  architectures: []
+  optimizations: []
+output:
+  save_checkpoints: true
+
+matrix:
+  representations: [histogram, de_raw, de_zscore, rjsd_zscore]
+  models: [logistic_regression, linear_svm, small_mlp, plain_transformer, hierarchical_attention]
+  reference_method: pooled_mean
+  seed: 42
+  # Predeclared before any formal target evaluation. All 15 folds use this value.
+  fixed_epoch: 80
+  histogram_batch_size: 1
+  default_batch_size: 16
+  # RTX 5080 Laptop 16GB throughput profile; scientific protocol is unchanged.
+  model_batch_sizes:
+    small_mlp: 64
+    plain_transformer: 64
+    hierarchical_attention: 16
+  precision: bfloat16
+  model_precisions:
+    small_mlp: float32
+  matmul_precision: high
+  # Runtime-only loader tuning. The sampler preserves the old epoch order.
+  dataloader_workers: 2
+  persistent_workers: true
+  prefetch_factor: 1
+  classical_workers: 4
+  classical_threads_per_worker: 8
+  linear_svm_tol: 0.001
+  linear_svm_max_iter: 5000

@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import csv
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from cmrd.data.records import TrialSample
 from cmrd.models import HierarchicalChannelBandTransformer
-from train_seediv_de_rjsd_ica import _build_model, build_parser, parse_args_with_config
+from train_seediv_de_rjsd_ica import (
+    _build_model,
+    _train_all_source_once,
+    build_parser,
+    parse_args_with_config,
+)
 
 
 class HierarchicalAttentionTests(unittest.TestCase):
@@ -71,6 +79,29 @@ class HierarchicalAttentionTests(unittest.TestCase):
             original_logits = model(data, mask)
             changed_logits = model(changed, mask)
         torch.testing.assert_close(original_logits, changed_logits)
+
+    def test_precomputed_valid_indices_preserve_logits_and_attention(self) -> None:
+        model = self.make_model()
+        data = torch.randn(2, 6, 12)
+        mask = torch.tensor(
+            [[True, True, False, False, False, False], [True, True, True, True, False, False]]
+        )
+        valid_indices = mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+        with torch.no_grad():
+            fallback_logits, fallback_attention = model(data, mask, return_attention=True)
+            indexed_logits, indexed_attention = model(
+                data,
+                mask,
+                return_attention=True,
+                valid_indices=valid_indices,
+            )
+        torch.testing.assert_close(indexed_logits, fallback_logits, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(
+            indexed_attention["band"], fallback_attention["band"], rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            indexed_attention["channel"], fallback_attention["channel"], rtol=0.0, atol=0.0
+        )
 
     def test_training_script_builds_notebook_equivalent_model(self) -> None:
         args = build_parser().parse_args([
@@ -134,6 +165,60 @@ runtime:
         self.assertTrue(args.resume)
         self.assertTrue(args.no_pin_memory)
         self.assertFalse(args.non_deterministic)
+
+    def test_periodic_evaluation_is_monitoring_only(self) -> None:
+        rng = np.random.default_rng(8)
+
+        def samples(subject: int, count: int) -> list[TrialSample]:
+            return [
+                TrialSample(
+                    rng.normal(size=(3 + index % 2, 6)).astype(np.float32),
+                    index % 4,
+                    subject,
+                    1,
+                    index + 1,
+                    subject * 100 + index,
+                )
+                for index in range(count)
+            ]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "job"
+            result = _train_all_source_once(
+                train_samples=samples(1, 8),
+                test_samples=samples(2, 4),
+                model_config={
+                    "name": "plain_transformer",
+                    "d_model": 8,
+                    "nhead": 2,
+                    "layers": 1,
+                    "feedforward": 16,
+                    "dropout": 0.0,
+                },
+                training={
+                    "epochs": 2,
+                    "evaluation_interval": 1,
+                    "batch_size": 4,
+                    "learning_rate": 1e-3,
+                    "minimum_learning_rate": 1e-5,
+                    "weight_decay": 0.0,
+                    "label_smoothing": 0.0,
+                    "gradient_clip_norm": 1.0,
+                    "num_workers": 0,
+                    "pin_memory": False,
+                    "deterministic": True,
+                },
+                seed=42,
+                device=torch.device("cpu"),
+                output_dir=output,
+                context={"target_subject": 2, "feature": "de"},
+            )
+            with (output / "evaluations.csv").open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertTrue((output / "final.pt").is_file())
+        self.assertEqual([int(row["epoch"]) for row in rows], [1, 2])
+        self.assertTrue(result["target_evaluated_during_training"])
+        self.assertEqual(result["final_epoch"], 2)
 
 
 if __name__ == "__main__":

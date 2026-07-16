@@ -18,4 +18,6 @@ Dataset/
 *.egg-info/
 build/
 dist/
-
+artifacts/
+past/
+tmp/

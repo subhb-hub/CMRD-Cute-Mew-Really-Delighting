@@ -181,3 +181,79 @@ conda run -n bilstm python -m unittest discover -s tests -v
 The tests cover formulas and shapes, configuration/path handling, cache
 signatures, subject isolation, source-only normalization, padding invariance,
 target-free tuning, checkpoint/result writing, and resume behavior.
+
+## Fixed-protocol RJSD matrix
+
+The revision experiments use a separate, immutable first-stage protocol:
+15-fold LOSO, 1 s non-overlapping windows, and seed 42. Each formal fold trains
+on all 14 source subjects for one predeclared dataset-level epoch count, then
+evaluates the held-out target subject exactly once. The cached 12/2 source split
+is used only by later mechanism diagnostics; it is not used for formal model
+selection. The full matrix contains 600 fold jobs across both datasets, four
+representations, and five models.
+
+The default fixed epoch is 80 for both datasets. If it should be changed, edit
+`matrix.fixed_epoch` in the two fixed-protocol configs before `LockEpoch`. The
+lock is immutable once formal tasks start and prevents accidental epoch changes.
+
+Prepare and validate the matching 1 s / 1 s caches, lock the dataset-level
+epochs, and run the short smoke checks first:
+
+```powershell
+.\scripts\run_fixed_protocol.ps1 -Stage Prepare
+.\scripts\run_fixed_protocol.ps1 -Stage Validate
+.\scripts\run_fixed_protocol.ps1 -Stage LockEpoch
+.\scripts\run_fixed_protocol.ps1 -Stage Smoke
+```
+
+Start or resume the long matrix without interactive monitoring:
+
+```powershell
+.\scripts\run_fixed_protocol.ps1 -Stage Matrix -Resume -RetryFailed
+```
+
+The small MLP uses trial-level temporal mean and standard deviation features,
+standardized using all 14 source subjects only. To run or resume just the MLP
+conditions before continuing the rest of the matrix:
+
+```powershell
+.\scripts\run_fixed_protocol.ps1 -Stage MLP -Resume -RetryFailed
+```
+
+The fixed-protocol configs include an RTX 5080 Laptop 16GB runtime profile:
+batch sizes 64 for the pooled MLP, 64 for the plain Transformer, and 16 for
+hierarchical attention. The MLP remains float32 because BF16 did not improve
+its measured throughput and reduced source-validation accuracy; both
+Transformer models use BF16 autocast. Deterministic math attention remains
+enabled. Windows data loaders stay single-process because samples are already
+resident in memory and worker processes would duplicate large arrays.
+
+Feature archives are decompressed once per dataset process and reused through
+an in-memory LRU cache. The first classical task for each underlying feature
+family warms that cache, after which folds run four at a time with eight
+numerical threads per task. GPU models remain sequential to avoid device-memory
+contention. Separate `Classic`, `MLP`, `Transformer`, and `Hierarchical` stages
+allow long model families to be resumed independently.
+
+Linear SVM uses `tol=1e-3` and `max_iter=5000`; this converged faster in the
+source-only benchmark than the stricter default tolerance. Strict summaries
+reject older SVM artifacts that reached the previous 1000-iteration ceiling.
+
+Inspect progress without attaching to the training process:
+
+```powershell
+.\scripts\run_fixed_protocol.ps1 -Stage Status
+```
+
+After all 600 tasks complete, create the strict statistical summary and then
+run the source-only mechanism analyses:
+
+```powershell
+.\scripts\run_fixed_protocol.ps1 -Stage Summarize
+.\scripts\run_fixed_protocol.ps1 -Stage Mechanism
+```
+
+The handoff artifacts are `runs/fixed_protocol_seed42/matrix_manifest.json`,
+`summary.json`, `failed_tasks.csv` (when applicable), and the per-dataset files
+under `mechanism/`. Historical target-monitoring runs are never reused by this
+pipeline.

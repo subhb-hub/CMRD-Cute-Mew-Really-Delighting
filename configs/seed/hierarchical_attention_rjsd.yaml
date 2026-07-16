@@ -1,19 +1,18 @@
-# Formal SEED-IV LOSO experiment using the notebook-selected hierarchy.
+# Formal SEED LOSO experiment using hierarchical band/channel/time attention.
 # Run from the repository root with:
-#   python scripts/train_seediv_de_rjsd_ica.py --config configs/seediv/hierarchical_attention_rjsd.yaml
+#   python scripts/train_seed_de_rjsd_ica.py --config configs/seed/hierarchical_attention_rjsd.yaml
 
 paths:
-  # null lets the script auto-discover the newest complete 1 s / 0.5 s cache.
+  # null uses Dataset/Processed/CMRD/seed/de_rjsd_ica_1s_hop05.
   data_root: null
-  # null uses runs/seediv/de_rjsd_ica.
+  # null uses runs/seed/de_rjsd_ica.
   output_root: null
 
 experiment:
-  run_name: rjsd_hierattn_d128_l3_seed42_monitor10
+  run_name: seed_rjsd_hierattn_d128_l3_seed42_monitor10
   feature: rjsd
-  # Used only for CMRD or FUSION.
   alpha: 0.5
-  # null runs all target subjects 1..15. For a smoke test use: [1]
+  # null runs all 15 LOSO targets. For a smoke test use: [1]
   folds: null
   # For a multi-seed report use: [42, 3407, 2026]
   seeds: [42]
@@ -28,8 +27,7 @@ model:
   dropout: 0.2
 
 training:
-  epochs: 50
-  # Monitoring only: does not select checkpoints, stop training, or change optimization.
+  epochs: 80
   evaluation_interval: 10
   batch_size: 8
   learning_rate: 0.0001

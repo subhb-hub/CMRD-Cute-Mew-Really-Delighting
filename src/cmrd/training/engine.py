@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from cmrd.data.records import TrialSample
 from cmrd.io import write_json
@@ -39,22 +39,86 @@ def fit_normalizer(samples: list[TrialSample]) -> tuple[np.ndarray, np.ndarray]:
 
 
 class SequenceDataset(Dataset):
-    def __init__(self, samples: list[TrialSample], mean: np.ndarray, std: np.ndarray) -> None:
-        self.samples = samples
+    def __init__(
+        self,
+        samples: list[TrialSample],
+        mean: np.ndarray,
+        std: np.ndarray,
+        *,
+        cache_normalized: bool = False,
+        share_memory: bool = False,
+    ) -> None:
+        self.samples: list[TrialSample] | None = samples
         self.mean = mean
         self.std = std
+        self._labels = np.asarray([sample.label for sample in samples], dtype=np.int64)
+        self._offsets: np.ndarray | None = None
+        self._normalized: torch.Tensor | None = None
+        if cache_normalized:
+            lengths = np.asarray([sample.x.shape[0] for sample in samples], dtype=np.int64)
+            offsets = np.empty(len(samples) + 1, dtype=np.int64)
+            offsets[0] = 0
+            np.cumsum(lengths, out=offsets[1:])
+            feature_dim = int(samples[0].x.shape[1]) if samples else int(mean.shape[0])
+            normalized = torch.empty((int(offsets[-1]), feature_dim), dtype=torch.float32)
+            if share_memory:
+                # Allocate shared storage before filling it to avoid a second
+                # full-size copy at worker startup.
+                normalized.share_memory_()
+            for index, sample in enumerate(samples):
+                value = np.ascontiguousarray((sample.x - mean) / std, dtype=np.float32)
+                normalized[int(offsets[index]):int(offsets[index + 1])].copy_(torch.from_numpy(value))
+            self._offsets = offsets
+            self._normalized = normalized
+            # Workers only receive the compact contiguous cache, not the large
+            # original list of NumPy arrays. This matters on Windows spawn.
+            self.samples = None
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return int(self._labels.shape[0])
 
     def __getitem__(self, index: int):
+        if self._normalized is not None and self._offsets is not None:
+            start, stop = int(self._offsets[index]), int(self._offsets[index + 1])
+            return self._normalized[start:stop], int(self._labels[index])
+        assert self.samples is not None
         sample = self.samples[index]
         normalized = (sample.x - self.mean) / self.std
         return torch.from_numpy(normalized.astype(np.float32)), sample.label
 
 
+class LegacyDataLoaderRandomSampler(Sampler[int]):
+    """Preserve the old num_workers=0 shuffle stream with persistent workers.
+
+    PyTorch's regular DataLoader consumes one random value for its iterator
+    seed before RandomSampler draws each epoch permutation. Persistent workers
+    omit that iterator recreation on later epochs. Replaying that one draw in
+    the sampler keeps every epoch's sample order identical to the old loader,
+    while a separate generator is used solely for worker initialization.
+    """
+
+    def __init__(self, data_source: Dataset, seed: int) -> None:
+        self.data_source = data_source
+        self.generator = torch.Generator().manual_seed(seed)
+
+    def __iter__(self):
+        torch.empty((), dtype=torch.int64).random_(generator=self.generator)
+        yield from torch.randperm(len(self.data_source), generator=self.generator).tolist()
+        # RandomSampler also draws a second permutation and takes an empty
+        # remainder slice when num_samples == len(dataset). Preserve that RNG
+        # advance so later epochs remain byte-for-byte compatible.
+        torch.randperm(len(self.data_source), generator=self.generator)
+
+    def __len__(self) -> int:
+        return len(self.data_source)
+
+
 def collate_sequences(batch):
+    if not batch:
+        raise ValueError("Cannot collate an empty sequence batch")
     lengths = [item[0].shape[0] for item in batch]
+    if any(length < 1 for length in lengths):
+        raise ValueError("Every sequence must contain at least one valid time step")
     maximum = max(lengths)
     features = batch[0][0].shape[1]
     data = torch.zeros(len(batch), maximum, features, dtype=torch.float32)
@@ -211,4 +275,3 @@ def train_once(
         }, output_dir / "best.pt")
     write_json(output_dir / "result.json", result)
     return result
-
