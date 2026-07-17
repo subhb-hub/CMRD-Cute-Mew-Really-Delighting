@@ -1,0 +1,272 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "RJSD 实验进展、结果与下一阶段路线图",
+    "description": "基于正式 15 折单种子主矩阵与后续 fold-1 探索实验的技术总结。",
+    "generatedAt": "2026-07-17T16:00:00+08:00",
+    "charts": [
+      {
+        "id": "formal_hierarchical_chart",
+        "title": "分层注意力模型下四种表征的 Macro-F1",
+        "subtitle": "15 折 LOSO，seed=42；柱高为目标受试者 Macro-F1 均值",
+        "type": "bar",
+        "dataset": "formal_hierarchical",
+        "source": {
+          "id": "formal_summary",
+          "label": "正式主矩阵统计汇总",
+          "query": {
+            "engine": "duckdb",
+            "language": "sql",
+            "description": "读取严格汇总器生成的正式条件统计。",
+            "sql": "SELECT condition.dataset, condition.representation, condition.model, condition.folds, condition.accuracy_mean, condition.macro_f1_mean, condition.macro_f1_subject_std FROM read_json_auto('runs/fixed_protocol_seed42/summary.json') AS summary, UNNEST(summary.conditions) AS item(condition)",
+            "tables_used": ["runs/fixed_protocol_seed42/summary.json"],
+            "filters": ["status=complete", "seed=42", "folds=15", "fixed_epoch=80"],
+            "metric_definitions": { "macro_f1": "每个目标受试者类别等权 F1，再对 15 名目标受试者等权平均。" }
+          }
+        },
+        "valueFormat": "percent",
+        "encodings": {
+          "x": { "field": "representation", "type": "nominal", "label": "表征" },
+          "y": { "field": "macro_f1", "type": "quantitative", "label": "Macro-F1", "format": "percent" },
+          "color": { "field": "dataset", "type": "nominal", "label": "数据集" },
+          "tooltip": [
+            { "field": "accuracy", "type": "quantitative", "label": "Accuracy", "format": "percent" },
+            { "field": "subject_sd", "type": "quantitative", "label": "受试者标准差", "format": "percent" },
+            { "field": "folds", "type": "quantitative", "label": "折数" }
+          ]
+        },
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "formal_matrix_table",
+        "title": "正式主矩阵 Macro-F1 明细",
+        "subtitle": "每个单元格均为 15 名目标受试者的均值；seed=42",
+        "dataset": "formal_matrix",
+        "source": {
+          "id": "formal_summary",
+          "label": "正式主矩阵统计汇总",
+          "query": {
+            "engine": "duckdb",
+            "language": "sql",
+            "description": "读取严格汇总器生成的正式条件统计。",
+            "sql": "SELECT condition.dataset, condition.representation, condition.model, condition.folds, condition.accuracy_mean, condition.macro_f1_mean, condition.macro_f1_subject_std FROM read_json_auto('runs/fixed_protocol_seed42/summary.json') AS summary, UNNEST(summary.conditions) AS item(condition)",
+            "tables_used": ["runs/fixed_protocol_seed42/summary.json"],
+            "filters": ["status=complete", "seed=42", "folds=15", "fixed_epoch=80"],
+            "metric_definitions": { "macro_f1": "每个目标受试者类别等权 F1，再对 15 名目标受试者等权平均。" }
+          }
+        },
+        "defaultSort": { "field": "dataset", "direction": "asc" },
+        "columns": [
+          { "field": "dataset", "label": "数据集", "type": "text" },
+          { "field": "representation", "label": "表征", "type": "text" },
+          { "field": "lr", "label": "LR", "format": "percent" },
+          { "field": "svm", "label": "SVM", "format": "percent" },
+          { "field": "mlp", "label": "Small MLP", "format": "percent" },
+          { "field": "transformer", "label": "Transformer", "format": "percent" },
+          { "field": "hierarchical", "label": "分层注意力", "format": "percent" }
+        ]
+      },
+      {
+        "id": "exploratory_table",
+        "title": "训练 v2 与 sRJSD/Large 的 fold-1 探索结果",
+        "subtitle": "目标受试者每 10 epoch 监控；峰值仅作诊断，不能作为正式选模依据",
+        "dataset": "exploratory_fold1",
+        "source": {
+          "id": "exploratory_summary",
+          "label": "sRJSD-Large-v1 fold-1 探索汇总",
+          "query": {
+            "engine": "duckdb",
+            "language": "sql",
+            "description": "读取 fold-1 每 10 epoch 目标监控曲线。",
+            "sql": "SELECT dataset, condition, epoch, macro_f1_mean FROM read_csv_auto('runs/srjsd_large_v1_seed42/target_curve_summary.csv') WHERE epoch BETWEEN 10 AND 200",
+            "tables_used": ["runs/srjsd_large_v1_seed42/target_curve_summary.csv"],
+            "filters": ["seed=42", "fold=1", "monitor_interval=10"],
+            "metric_definitions": { "peak": "每 10 epoch 记录的目标 Macro-F1 最大值，仅作探索诊断。" }
+          }
+        },
+        "defaultSort": { "field": "dataset", "direction": "asc" },
+        "columns": [
+          { "field": "dataset", "label": "数据集", "type": "text" },
+          { "field": "condition", "label": "条件", "type": "text" },
+          { "field": "epoch80", "label": "Epoch 80", "format": "percent" },
+          { "field": "peak", "label": "监控峰值", "format": "percent" },
+          { "field": "peak_epoch", "label": "峰值 epoch", "type": "number" },
+          { "field": "epoch200", "label": "Epoch 200", "format": "percent" }
+        ]
+      }
+    ],
+    "sources": [
+      { "id": "formal_summary", "label": "正式主矩阵统计汇总", "path": "runs/fixed_protocol_seed42/summary.json" },
+      { "id": "formal_manifest", "label": "正式主矩阵任务清单与协议哈希", "path": "runs/fixed_protocol_seed42/matrix_manifest.json" },
+      { "id": "protocol_audit", "label": "15 折 LOSO 协议审计", "path": "runs/fixed_protocol_seed42/protocol_audit_seed.json" },
+      { "id": "exploratory_summary", "label": "sRJSD-Large-v1 fold-1 探索汇总", "path": "runs/srjsd_large_v1_seed42/summary.json" },
+      { "id": "test_suite", "label": "本地 unittest 测试套件", "path": "tests" }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# RJSD 实验进展、结果与下一阶段路线图"
+      },
+      {
+        "id": "technical_summary_formal",
+        "type": "markdown",
+        "sourceId": "formal_summary",
+        "body": "## 技术总结：主矩阵已完成，但 RJSD 的结论具有数据集依赖性\n\n正式主矩阵已经完成 **600/600** 个折级任务：SEED 与 SEED-IV、4 种表征、5 种模型、15 折 LOSO，统一使用 seed=42 和数据集级固定 80 epoch。SEED 上最佳正式结果是 DE-z + 分层注意力，Macro-F1 为 **75.24%**；RJSD + 分层注意力为 **69.41%**。SEED-IV 上直方图 + 分层注意力达到 **85.67%**，RJSD + 分层注意力达到 **80.38%**，并略高于 DE-z 的 **78.55%**。因此，当前证据支持“RJSD 是紧凑且能被结构化模型利用的表征”，但不支持“普通 RJSD 已经普遍优于 DE 或完整直方图”。"
+      },
+      {
+        "id": "technical_summary_exploratory",
+        "type": "markdown",
+        "sourceId": "exploratory_summary",
+        "body": "## fold-1 探索表明训练 v2 有价值，扩大模型规模则不稳定\n\n训练 v2 在同一个 fold-1、同为 Base RJSD、同看 epoch 80 时，将 SEED Macro-F1 从旧正式训练的 **75.33%** 提高到 **77.47%**，将 SEED-IV 从 **82.93%** 提高到 **93.01%**。带符号 sqrt(JSD) 在 SEED Base 上进一步达到 **80.24%**，但在 SEED-IV Base 上下降到 **91.34%**；Large 也没有跨数据集稳定超过 Base。由于这里只覆盖每个数据集的第 1 折，而且目标曲线被周期性查看，这些数字只能用于产生假设。"
+      },
+      {
+        "id": "work_completed",
+        "type": "markdown",
+        "sourceId": "formal_manifest",
+        "body": "## 已完成的工作：协议、脚本、运行稳定性和正式矩阵均已落地\n\n1. 冻结了 **15 折 LOSO**：每折 14 名源受试者完整训练、1 名目标受试者测试。\n2. 修正了此前“每 fold 选择不同 epoch”的错误，正式矩阵改为每个数据集统一固定 **80 epoch**，并删除/重置容易混淆的旧任务。\n3. 实现了可恢复的 Python 与 PowerShell 入口，支持缓存验证、冒烟、分模型阶段运行、断点续跑、失败重试、状态和严格汇总。\n4. 完成 SEED 与 SEED-IV 的 4×5×15 全矩阵，总计 600 个任务，当前无缺折、无失败、无协议哈希混用。\n5. 修正 Small MLP：从会塌缩的序列均值输入改为源域标准化的 trial 均值+标准差输入，并重新运行。\n6. 修正旧 LinearSVC 的迭代上限问题并重新运行受影响任务。\n7. 完成运行加速和 Windows 内存保护：折级特征与标准化缓存、模型特定 batch、BF16、持久 worker 的安全路径、直方图/大张量的主进程路径、及时关闭 worker，以及将动态 mask 索引移出 GPU forward。"
+      },
+      {
+        "id": "formal_result_heading",
+        "type": "markdown",
+        "sourceId": "formal_summary",
+        "body": "## 正式结果的核心不是单一表征排名，而是表征与模型结构的强交互\n\nRJSD 在经典模型、Small MLP 和普通 Transformer 上表现较弱，但换成通道—频带分层模型后，SEED 从 **49.80%** 提升到 **69.41%**，SEED-IV 从 **46.06%** 提升到 **80.38%**。这说明当前 RJSD 的有效信息并非简单线性可分，而高度依赖模型对通道与频带结构的建模。下图同时显示，完整直方图仍保留了 RJSD 压缩时丢失的有效形状信息。"
+      },
+      { "id": "formal_chart", "type": "chart", "chartId": "formal_hierarchical_chart", "layout": "full" },
+      {
+        "id": "formal_interpretation",
+        "type": "markdown",
+        "sourceId": "formal_summary",
+        "body": "## SEED 是目前的主要难点，SEED-IV 则证明 RJSD 方向并非失败\n\n在 SEED 的分层注意力模型中，RJSD 比 DE-z 低 **5.83 个 Macro-F1 百分点**；配对 bootstrap 95% 区间约为 **-9.89 到 -2.07 个百分点**，Holm 校正后的 Wilcoxon p≈**0.0269**。这是真正需要改进的缺口。SEED-IV 中，RJSD 比 DE-z 高 **1.83 个百分点**，但区间跨 0、检验不显著，因此只能说方向积极而不是已经证实优越。"
+      },
+      { "id": "formal_table", "type": "table", "tableId": "formal_matrix_table", "layout": "full" },
+      {
+        "id": "exploratory_interpretation",
+        "type": "markdown",
+        "sourceId": "exploratory_summary",
+        "body": "## fold-1 曲线否定了两个简单假设：更大模型不必然更好，200 epoch 也不必然更好\n\nSEED 上多数条件在中前期达到较高目标表现，随后明显波动或回落；普通 RJSD Base 从 epoch 80 的 **77.47%** 回落到 epoch 200 的 **66.39%**。SEED-IV 的普通 RJSD Base 则随训练继续改善并在 140 epoch 后达到约 **94.36%**。这种数据集差异说明训练长度需要按数据集冻结，而不能沿用“一套 epoch 适合所有数据集”的假设。Large 对普通 RJSD 在 SEED 仅小幅变化，在 SEED-IV 反而明显下降，所以后续应回到 Base，把实验预算用于表征而不是容量。"
+      },
+      { "id": "exploratory_results", "type": "table", "tableId": "exploratory_table", "layout": "full" },
+      {
+        "id": "protocol_scope",
+        "type": "markdown",
+        "sourceId": "protocol_audit",
+        "body": "## 证据边界：正式矩阵可用于 15 名受试者配对比较，目标监控实验只能探索\n\n正式主矩阵没有训练期目标监控，参考分布、标准化和模型训练均只使用当前 fold 的 14 名源受试者。后续探索运行则在源参考和归一化锁定后构造目标加载器，每 10 epoch 记录一次目标指标；这些指标不参与梯度、早停或 checkpoint 选择。即便如此，查看目标曲线本身仍会影响研究者的后续选择，因此目标峰值不能写成无偏正式结果。"
+      },
+      {
+        "id": "validation",
+        "type": "markdown",
+        "sourceId": "test_suite",
+        "body": "## 当前实现验证：42 项单元测试全部通过\n\n测试覆盖 14+1 协议审计、无受试者重叠、固定 epoch 锁、目标访问顺序、断点续跑、协议哈希、任务去重、Small MLP 输入、两 worker 顺序等价性、Windows 共享映射保护、缓存标准化等价性、预计算 mask 索引等价性，以及 sRJSD 方向与维度。当前环境使用 `unittest` 完成 **42/42** 项测试；两个 Conda 环境均未安装 pytest，但这不影响现有 unittest 测试执行。"
+      },
+      {
+        "id": "next_representation",
+        "type": "markdown",
+        "body": "## 下一步应优先改进紧凑表征，而不是扩大 Base\n\n下一轮保持 Base 和训练 v2，按控制变量顺序测试：\n\n1. **无符号 sqrt-RJSD（310 维）**：先分离平方根缩放与方向符号的贡献。\n2. **幅度—方向解耦（620 维）**：输入 `[sqrt(JSD), sqrt(JSD)·tanh(Δμ/τ)]`，让微弱质心变化只产生微弱方向信号，同时不破坏距离幅度。\n3. **正—中—负三参考坐标（930 维）**：用源域、受试者平衡的正/中/负参考，构造正负轴、中心对两端轴和整体偏离轴，直接匹配 SEED 标签对称性。\n4. **RJSD + 三个低阶 CLR-DCT 形状系数（1240 维）**：保留直方图中最主要的低阶形状变化，同时仍只有原始 9920 维直方图的 1/8。\n\n这四种条件分别回答缩放、物理方向、类别语义方向和频谱形状信息是否是 SEED 缺口的来源。"
+      },
+      {
+        "id": "next_training",
+        "type": "markdown",
+        "body": "## 表征筛选后，再测试不增加输入量的训练约束\n\n只在表现最好的 1–2 个紧凑表征上加入训练改进：\n\n- **序数辅助损失**：交叉熵仍为主损失，附加较弱的 `-1/0/+1` 期望值约束，优先测试 λ=0.1 和 0.2。\n- **跨受试者监督对比损失**：同情绪、不同受试者作为正样本，鼓励 Base 学到跨受试者共享的情绪表示。\n- 源受试者对抗或 GroupDRO 暂列第二梯队，因为它们可能同时去除情绪相关信号。\n\n不建议立即做所有表征与所有损失的笛卡尔积；应先筛表征，再筛训练目标。"
+      },
+      {
+        "id": "execution_plan",
+        "type": "markdown",
+        "body": "## 推荐的后续执行顺序\n\n1. **快速表征筛选**：两个数据集、fold-1、Base、训练 v2、每 10 epoch 监控，运行无符号 sqrt、解耦方向、三参考坐标、CLR-DCT 四个新增条件，并保留普通 RJSD 锚点。\n2. **小范围稳健性复核**：将最好的 2 个条件扩展到预先固定的 folds 1/8/15，确认不是单个受试者偶然性。\n3. **训练约束筛选**：在最佳表征上比较普通 CE、CE+序数、CE+跨受试者对比。\n4. **冻结正式方案**：基于源域规则确定每个数据集统一 epoch，重新运行 15 折且关闭目标驱动选择。\n5. **机制验证**：受试者识别探针、情绪可分性、参考稳定性、通道—频带遮挡及 SEED 分解诊断。\n6. **候选冻结后补多种子**：仅对最佳紧凑 RJSD、最简近优 RJSD 和 DE 对照补 seed=3407、2026。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 尚未完成与当前限制\n\n- 机制验证阶段尚未正式运行，因此还不能回答 RJSD 是否真正减少受试者信息。\n- 改进实验目前只有 fold-1，不能进行有意义的置信区间、Wilcoxon 或跨受试者稳定性判断。\n- 当前所有正式主矩阵结果只有 seed=42，应明确标记为探索性单种子证据。\n- 三类别参考坐标使用源域标签，属于监督式 RJSD 扩展，论文中必须与无监督普通 RJSD 区分。\n- SEED 的共享刺激结构可能让类别参考学习到刺激模板，因此后续需要加入 trial/刺激模板诊断。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 下一轮最需要回答的问题\n\n1. signed sqrt 的增益究竟来自 `sqrt`，还是来自方向符号？\n2. SEED 的主要损失来自 RJSD 压缩掉的形状信息，还是来自全局参考与三类对称结构不匹配？\n3. 三类别参考在不同源受试者与 session 间是否稳定？\n4. 跨受试者对比学习能否提升 SEED，同时不损害 SEED-IV？\n5. 最终固定 epoch 应如何只依靠源域证据冻结，而不追逐目标曲线峰值？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-17T16:00:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "formal_hierarchical": [
+        { "dataset": "SEED", "representation": "Histogram", "macro_f1": 0.7237497248, "accuracy": 0.7303703704, "subject_sd": 0.0262464960, "folds": 15 },
+        { "dataset": "SEED", "representation": "DE raw", "macro_f1": 0.7520717389, "accuracy": 0.7555555556, "subject_sd": 0.0395454278, "folds": 15 },
+        { "dataset": "SEED", "representation": "DE z-score", "macro_f1": 0.7524333012, "accuracy": 0.7570370370, "subject_sd": 0.0513464662, "folds": 15 },
+        { "dataset": "SEED", "representation": "RJSD", "macro_f1": 0.6941116833, "accuracy": 0.6977777778, "subject_sd": 0.0579223638, "folds": 15 },
+        { "dataset": "SEED-IV", "representation": "Histogram", "macro_f1": 0.8567199733, "accuracy": 0.8564814815, "subject_sd": 0.0086120547, "folds": 15 },
+        { "dataset": "SEED-IV", "representation": "DE raw", "macro_f1": 0.7709297969, "accuracy": 0.7731481481, "subject_sd": 0.0569188115, "folds": 15 },
+        { "dataset": "SEED-IV", "representation": "DE z-score", "macro_f1": 0.7854882501, "accuracy": 0.7870370370, "subject_sd": 0.0681599419, "folds": 15 },
+        { "dataset": "SEED-IV", "representation": "RJSD", "macro_f1": 0.8037827660, "accuracy": 0.8064814815, "subject_sd": 0.0340924353, "folds": 15 }
+      ],
+      "formal_matrix": [
+        { "dataset": "SEED", "representation": "Histogram", "lr": 0.3965789827, "svm": 0.4206434097, "mlp": 0.4477495574, "transformer": 0.7388018443, "hierarchical": 0.7237497248 },
+        { "dataset": "SEED", "representation": "DE raw", "lr": 0.4018871609, "svm": 0.4096701984, "mlp": 0.4463006984, "transformer": 0.6507868081, "hierarchical": 0.7520717389 },
+        { "dataset": "SEED", "representation": "DE z-score", "lr": 0.4141580062, "svm": 0.4231760585, "mlp": 0.4463006984, "transformer": 0.5628992759, "hierarchical": 0.7524333012 },
+        { "dataset": "SEED", "representation": "RJSD", "lr": 0.3674892498, "svm": 0.3874969298, "mlp": 0.3932073528, "transformer": 0.4979759240, "hierarchical": 0.6941116833 },
+        { "dataset": "SEED-IV", "representation": "Histogram", "lr": 0.3204035988, "svm": 0.3214822294, "mlp": 0.3206238803, "transformer": 0.7042650294, "hierarchical": 0.8567199733 },
+        { "dataset": "SEED-IV", "representation": "DE raw", "lr": 0.3131448594, "svm": 0.3173975040, "mlp": 0.3261236902, "transformer": 0.5372633341, "hierarchical": 0.7709297969 },
+        { "dataset": "SEED-IV", "representation": "DE z-score", "lr": 0.3064258804, "svm": 0.3006267612, "mlp": 0.3261236902, "transformer": 0.5150742164, "hierarchical": 0.7854882501 },
+        { "dataset": "SEED-IV", "representation": "RJSD", "lr": 0.2923449974, "svm": 0.2675518949, "mlp": 0.2860037194, "transformer": 0.4605854349, "hierarchical": 0.8037827660 }
+      ],
+      "exploratory_fold1": [
+        { "dataset": "SEED", "condition": "RJSD Base v2", "epoch80": 0.7747311828, "peak": 0.7747311828, "peak_epoch": 80, "epoch200": 0.6639287137 },
+        { "dataset": "SEED", "condition": "signed sqrt-RJSD Base", "epoch80": 0.8023809524, "peak": 0.8443208503, "peak_epoch": 70, "epoch200": 0.7579365079 },
+        { "dataset": "SEED", "condition": "RJSD Large", "epoch80": 0.7805932629, "peak": 0.7805932629, "peak_epoch": 80, "epoch200": 0.7568162155 },
+        { "dataset": "SEED", "condition": "signed sqrt-RJSD Large", "epoch80": 0.6306257982, "peak": 0.7481481481, "peak_epoch": 20, "epoch200": 0.7056208160 },
+        { "dataset": "SEED", "condition": "DE-z Large", "epoch80": 0.7459076534, "peak": 0.8655443322, "peak_epoch": 50, "epoch200": 0.8640552995 },
+        { "dataset": "SEED-IV", "condition": "RJSD Base v2", "epoch80": 0.9301480051, "peak": 0.9436293436, "peak_epoch": 140, "epoch200": 0.9436293436 },
+        { "dataset": "SEED-IV", "condition": "signed sqrt-RJSD Base", "epoch80": 0.9133998665, "peak": 0.9166023166, "peak_epoch": 150, "epoch200": 0.9021534361 },
+        { "dataset": "SEED-IV", "condition": "RJSD Large", "epoch80": 0.8990314327, "peak": 0.8990314327, "peak_epoch": 80, "epoch200": 0.8567745377 },
+        { "dataset": "SEED-IV", "condition": "signed sqrt-RJSD Large", "epoch80": 0.9179253753, "peak": 0.9440368940, "peak_epoch": 90, "epoch200": 0.9301480051 },
+        { "dataset": "SEED-IV", "condition": "DE-z Large", "epoch80": 0.8734560352, "peak": 0.9312400636, "peak_epoch": 150, "epoch200": 0.9308646882 }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "formal_summary",
+      "label": "正式主矩阵统计汇总",
+      "path": "runs/fixed_protocol_seed42/summary.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "description": "读取严格汇总器生成的正式 600 任务条件统计。",
+        "sql": "SELECT condition.dataset, condition.representation, condition.model, condition.folds, condition.accuracy_mean, condition.macro_f1_mean, condition.macro_f1_subject_std FROM read_json_auto('runs/fixed_protocol_seed42/summary.json') AS summary, UNNEST(summary.conditions) AS item(condition)",
+        "tables_used": ["runs/fixed_protocol_seed42/summary.json"],
+        "filters": ["status=complete", "seed=42", "folds=15", "fixed_epoch=80"],
+        "metric_definitions": {
+          "macro_f1": "先在每个目标受试者 fold 上计算类别等权 F1，再对 15 个目标受试者等权平均。",
+          "subject_sd": "15 个目标受试者 fold 指标的样本标准差。"
+        }
+      }
+    },
+    { "id": "formal_manifest", "label": "正式主矩阵任务清单与协议哈希", "path": "runs/fixed_protocol_seed42/matrix_manifest.json" },
+    { "id": "protocol_audit", "label": "15 折 LOSO 协议审计", "path": "runs/fixed_protocol_seed42/protocol_audit_seed.json" },
+    {
+      "id": "exploratory_summary",
+      "label": "sRJSD-Large-v1 fold-1 探索汇总",
+      "path": "runs/srjsd_large_v1_seed42/summary.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "description": "读取 fold-1 每 10 epoch 目标监控曲线与条件汇总。",
+        "sql": "SELECT dataset, condition, epoch, macro_f1_mean FROM read_csv_auto('runs/srjsd_large_v1_seed42/target_curve_summary.csv') WHERE epoch BETWEEN 10 AND 200",
+        "tables_used": ["runs/srjsd_large_v1_seed42/target_curve_summary.csv"],
+        "filters": ["seed=42", "fold=1", "monitor_interval=10"],
+        "metric_definitions": {
+          "epoch80": "目标受试者在第 80 epoch 的 Macro-F1。",
+          "peak": "每 10 epoch 记录的目标 Macro-F1 中的最大值，仅作探索性诊断。",
+          "epoch200": "固定最终第 200 epoch 的目标 Macro-F1。"
+        }
+      }
+    },
+    { "id": "test_suite", "label": "本地 unittest 测试套件", "path": "tests" }
+  ]
+}

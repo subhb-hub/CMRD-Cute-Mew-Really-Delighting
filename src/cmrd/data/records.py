@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -14,6 +15,9 @@ class TrialRecord:
     trial: int
     source_file: str
     source_key: str
+    eog_signal: np.ndarray | None = None
+    eog_names: tuple[str, ...] = ()
+    metadata: dict[str, Any] | None = None
 
     @property
     def trial_id(self) -> str:
@@ -28,4 +32,3 @@ class TrialSample:
     session: int
     trial: int
     source_index: int
-

@@ -1,0 +1,89 @@
+experiment:
+  dataset: seediv
+  feature: rd
+  model: hierarchical_attention
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs/native_compact_v1_seed42
+dataset:
+  raw_dir: Ori/SEED-IV/eeg_raw_data
+  channels: 62
+  subjects: 15
+  classes: 4
+signal:
+  original_rate: 200
+  target_rate: 200
+  broad_band_hz: [1.0, 75.0]
+  filter_order: 4
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 31.0]
+    gamma: [31.0, 50.0]
+feature:
+  name: native_compact_probability_geometry
+  hist_bins_per_band: 0
+  spectral_nfft: 200
+  storage_dtype: float32
+split:
+  protocol: loso
+  validation_subjects: 2
+  seed: 42
+model:
+  d_model: 128
+  nhead: 4
+  layers: 3
+  feedforward: 512
+  dropout: 0.15
+  hidden: 128
+training:
+  seeds: [42]
+  device: auto
+  deterministic: true
+  epochs: 200
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.000001
+  warmup_fraction: 0.1
+  weight_decay: 0.01
+  label_smoothing: 0.0
+  gradient_clip_norm: 1.0
+  precision: bfloat16
+  matmul_precision: high
+  num_workers: 2
+  persistent_workers: true
+  prefetch_factor: 1
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: false
+  selection_file: ""
+  architectures: []
+  optimizations: []
+output:
+  save_checkpoints: true
+
+native_compact:
+  seed: 42
+  fold: 1
+  max_epochs: 200
+  target_monitor_interval: 10
+  pca_max_windows_per_trial: 32
+  architecture:
+    d_model: 128
+    heads: 4
+    layers: 3
+    feedforward: 512
+    dropout: 0.15
+  conditions:
+    a_native_sqrt_jsd_base_v2:
+      representation: native_sqrt_jsd_zscore
+    b_native_fisher_rao_pca_base_v2:
+      representation: native_fisher_rao_pca_zscore
+    c_native_wasserstein1_base_v2:
+      representation: native_wasserstein1_zscore

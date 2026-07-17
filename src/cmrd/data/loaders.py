@@ -123,6 +123,10 @@ def dataset_paths(config: ExperimentConfig) -> tuple[Path, Path | None]:
 
 
 def validate_dataset(config: ExperimentConfig) -> dict[str, object]:
+    if config.dataset == "deap":
+        from .deap import validate_deap_dataset
+
+        return validate_deap_dataset(config)
     raw_dir, label_path = dataset_paths(config)
     if config.dataset == "seed":
         sessions = _seed_sessions(raw_dir)
@@ -151,6 +155,11 @@ def validate_dataset(config: ExperimentConfig) -> dict[str, object]:
 
 
 def iter_trials(config: ExperimentConfig) -> Iterator[TrialRecord]:
+    if config.dataset == "deap":
+        from .deap import iter_deap_trials
+
+        yield from iter_deap_trials(config)
+        return
     raw_dir, label_path = dataset_paths(config)
     channels = int(config.raw["dataset"]["channels"])
     if config.dataset == "seed":
@@ -175,4 +184,3 @@ def iter_trials(config: ExperimentConfig) -> Iterator[TrialRecord]:
                     _channels_first(mat[key], channels, f"SEED-IV {path.name}:{key}"),
                     int(SEEDIV_LABELS[session][trial - 1]), subject, session, trial, str(path), key,
                 )
-

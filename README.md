@@ -108,6 +108,35 @@ python scripts/preprocess_seediv_de_rjsd_ica_4s_hop1.py --stage all --strict-ica
 python scripts/preprocess_seed_de_rjsd_ica_4s_hop1.py --stage all --strict-ica --resume
 ```
 
+### DEAP original-BDF ICA-cleaned DE + RJSD preprocessing
+
+DEAP uses the original 512 Hz BDF archive, never the official 4-45 Hz
+preprocessed Python/Matlab release. The loader uses status code 4 as the video
+start, cuts exactly 60 s (excluding the pre-trial baseline), reorders every EEG
+channel by name to the canonical BioSemi32 order, resamples to 200 Hz, and keeps
+EXG1-EXG4 as EOG references during ICA. The formal default is a non-overlapping
+1 s window:
+
+```powershell
+conda activate cmrd
+python scripts/preprocess_deap_de_rjsd_ica.py --stage all --strict-ica --resume
+python scripts/validate_deap_de_rjsd_ica.py --deep --write
+```
+
+The default label is the valence/arousal quadrant at threshold 5.0:
+`LVLA=0`, `LVHA=1`, `HVLA=2`, and `HVHA=3`. Every trial manifest also retains
+the continuous valence, arousal, dominance, and liking ratings plus separately
+derived binary labels. The completed cache is stored under
+`../Dataset/Processed/CMRD/deap/de_rjsd_ica_1s_hop1/<signature>/`; the reusable
+ICA time series are under `../Dataset/Processed/CMRD/deap/ica_cleaned/`.
+
+DEAP subjects 23-32 use a different on-disk EEG order, subjects 24-28 leave the
+status-channel name blank, and subjects 29-32 contain duplicated unnamed status
+channels. The loader handles these documented source-file variations by channel
+name and by the low byte of the BioSemi status word; the end marker is retained
+for audit only because its timestamp is not reliable enough to define the fixed
+60 s stimulus cut.
+
 These scripts store ICA-cleaned continuous trials in the window-independent
 `../Dataset/Processed/CMRD/<dataset>/ica_cleaned/<cleaning-signature>/` cache.
 Later window configurations reuse that cache and only repeat feature windowing.
@@ -257,3 +286,31 @@ The handoff artifacts are `runs/fixed_protocol_seed42/matrix_manifest.json`,
 `summary.json`, `failed_tasks.csv` (when applicable), and the per-dataset files
 under `mechanism/`. Historical target-monitoring runs are never reused by this
 pipeline.
+
+## Native-grid compact feature pilot
+
+The fold-1 pilot compares three one-scalar-per-channel-band representations on
+the unpadded one-second FFT grid: square-root JSD, an unsupervised first
+Fisher-Rao tangent principal coordinate, and support-diameter-normalized
+Wasserstein-1. All source references, the Fisher-Rao PCA state, and z-score
+statistics are fitted from the 14 non-target subjects only. Training uses the
+Base architecture and v2 settings for 200 epochs; target metrics are recorded
+every 10 epochs for diagnosis but never select a checkpoint.
+
+Validate the reusable ICA-cleaned caches without starting training:
+
+```powershell
+.\scripts\run_native_compact.ps1 -Stage Validate -CondaEnv cmrd
+```
+
+Run both datasets and all three fold-1 conditions, with safe resume behavior:
+
+```powershell
+.\scripts\run_native_compact.ps1 -Stage All -CondaEnv cmrd -Resume -RetryFailed
+```
+
+Use `-Stage SqrtJsd`, `-Stage FisherRao`, or `-Stage Wasserstein` to run one
+representation after `-Stage Lock`. `-Dataset Seed` and `-Dataset SeedIV`
+restrict execution to one dataset. Artifacts are isolated under
+`runs/native_compact_v1_seed42/`; `-Stage Status` reads progress without
+starting work.

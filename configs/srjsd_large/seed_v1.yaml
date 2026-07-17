@@ -1,0 +1,106 @@
+experiment:
+  dataset: seed
+  feature: rd
+  model: hierarchical_attention
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs/srjsd_large_v1_seed42
+dataset:
+  raw_dir: Ori/SEED/Preprocessed_EEG
+  label_file: Ori/SEED/Preprocessed_EEG/label.mat
+  channels: 62
+  subjects: 15
+  classes: 3
+signal:
+  original_rate: 200
+  target_rate: 200
+  broad_band_hz: [1.0, 75.0]
+  filter_order: 4
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 31.0]
+    gamma: [31.0, 50.0]
+feature:
+  name: reference_deviation
+  old_name: rjsd
+  hist_bins_per_band: 32
+  spectral_nfft: 512
+  storage_dtype: float16
+split:
+  protocol: loso
+  validation_subjects: 2
+  seed: 42
+model:
+  d_model: 256
+  nhead: 8
+  layers: 4
+  feedforward: 1024
+  dropout: 0.15
+  hidden: 128
+training:
+  seeds: [42]
+  device: auto
+  deterministic: true
+  epochs: 200
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.000001
+  warmup_fraction: 0.1
+  weight_decay: 0.01
+  label_smoothing: 0.0
+  gradient_clip_norm: 1.0
+  precision: bfloat16
+  matmul_precision: high
+  num_workers: 2
+  persistent_workers: true
+  prefetch_factor: 1
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: false
+  selection_file: ""
+  architectures: []
+  optimizations: []
+output:
+  save_checkpoints: true
+
+srjsd_large:
+  seed: 42
+  max_epochs: 200
+  target_monitor_interval: 10
+  expected_total_tasks: 150
+  architectures:
+    base:
+      d_model: 128
+      heads: 4
+      layers: 3
+      feedforward: 512
+      dropout: 0.15
+    large:
+      d_model: 256
+      heads: 8
+      layers: 4
+      feedforward: 1024
+      dropout: 0.15
+  conditions:
+    a2_rjsd_base_v2:
+      representation: rjsd_zscore
+      architecture: base
+    b_srjsd_base_v2:
+      representation: srjsd_zscore
+      architecture: base
+    c_rjsd_large_v2:
+      representation: rjsd_zscore
+      architecture: large
+    d_srjsd_large_v2:
+      representation: srjsd_zscore
+      architecture: large
+    e_de_zscore_large_v2:
+      representation: de_zscore
+      architecture: large

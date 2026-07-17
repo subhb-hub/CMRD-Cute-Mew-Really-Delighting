@@ -70,7 +70,7 @@ def _signature_payload(args: argparse.Namespace, config: ExperimentConfig, chann
     if window_seconds <= 0 or hop_seconds <= 0:
         raise ValueError("window_seconds and hop_seconds must be positive")
     spectral_nfft = _spectral_nfft(window_seconds)
-    dataset_name = "SEED-IV" if config.dataset == "seediv" else "SEED"
+    dataset_name = {"seed": "SEED", "seediv": "SEED-IV", "deap": "DEAP"}[config.dataset]
     return {
         "schema_version": 1,
         "dataset": dataset_name,
@@ -111,7 +111,7 @@ def _signature_payload(args: argparse.Namespace, config: ExperimentConfig, chann
         "p_hist_storage_dtype": "float16",
         "de_storage_dtype": "float32",
         "fold_protocol": {
-            "outer": "15-subject LOSO",
+            "outer": f"{int(config.raw['dataset']['subjects'])}-subject LOSO",
             "source_validation_subjects": int(config.raw["split"]["validation_subjects"]),
             "split_seed": int(config.raw["split"]["seed"]),
             "reference_source": "source_train_only",
@@ -138,6 +138,7 @@ def _cleaning_signature_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "official_upstream_preprocessing",
         "montage_source",
         "channel_order_verification",
+        "eog_channels",
     )
     return {
         "schema_version": 1,
@@ -163,6 +164,8 @@ def clean_signal_with_mne(
     channel_names: list[str],
     montage: mne.channels.DigMontage,
     args: argparse.Namespace,
+    eog_signal_microvolt: np.ndarray | None = None,
+    eog_names: tuple[str, ...] = (),
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Notch -> 1 Hz high-pass -> ICA artifact rejection -> 1-75 Hz final band-pass."""
     if signal_microvolt.shape[0] != len(channel_names):
@@ -170,15 +173,27 @@ def clean_signal_with_mne(
 
     # MNE requires EEG in volts. Official SEED/SEED-IV arrays are represented in microvolts.
     signal_volt = np.asarray(signal_microvolt, dtype=np.float64) * 1e-6
-    info = mne.create_info(channel_names, sfreq=SAMPLING_RATE, ch_types=["eeg"] * len(channel_names))
-    raw = mne.io.RawArray(signal_volt, info, verbose="ERROR")
+    raw_names = list(channel_names)
+    raw_types = ["eeg"] * len(channel_names)
+    raw_data = signal_volt
+    if eog_signal_microvolt is not None:
+        eog = np.asarray(eog_signal_microvolt, dtype=np.float64)
+        if eog.ndim != 2 or eog.shape[1] != signal_volt.shape[1]:
+            raise ValueError(f"EOG signal shape {eog.shape} is incompatible with EEG {signal_volt.shape}")
+        if len(eog_names) != eog.shape[0] or not eog_names:
+            raise ValueError("One non-empty EOG channel name is required per auxiliary EOG signal")
+        raw_names.extend(eog_names)
+        raw_types.extend(["eog"] * len(eog_names))
+        raw_data = np.concatenate([signal_volt, eog * 1e-6], axis=0)
+    info = mne.create_info(raw_names, sfreq=SAMPLING_RATE, ch_types=raw_types)
+    raw = mne.io.RawArray(raw_data, info, verbose="ERROR")
     raw.set_montage(montage, on_missing="raise", verbose="ERROR")
     raw.notch_filter(freqs=[NOTCH_HZ], picks="eeg", phase="zero", verbose="ERROR")
     # ICA should be fitted to high-pass-filtered data. The final low-pass is applied after ICA.
     raw.filter(l_freq=BROAD_BAND_HZ[0], h_freq=None, picks="eeg", phase="zero", verbose="ERROR")
 
     interpolated_bad_channels: list[str] = []
-    channel_std_before_interpolation = np.std(raw.get_data(), axis=1)
+    channel_std_before_interpolation = np.std(raw.get_data(picks="eeg"), axis=1)
     if args.bad_channel_std_ratio is not None:
         ratio = float(args.bad_channel_std_ratio)
         if ratio <= 1.0:
@@ -225,7 +240,8 @@ def clean_signal_with_mne(
     muscle_scores: np.ndarray | list[float] = []
 
     try:
-        found, scores = ica.find_bads_eog(raw, ch_name=["Fp1", "Fp2"], verbose="ERROR")
+        detection_channels = list(eog_names) if eog_names else ["Fp1", "Fp2"]
+        found, scores = ica.find_bads_eog(raw, ch_name=detection_channels, verbose="ERROR")
         eog_indices = sorted(set(map(int, found)))
         eog_scores = np.asarray(scores)
     except Exception as exc:
@@ -252,7 +268,7 @@ def clean_signal_with_mne(
         phase="zero",
         verbose="ERROR",
     )
-    cleaned_microvolt = np.asarray(raw.get_data() * 1e6, dtype=np.float32)
+    cleaned_microvolt = np.asarray(raw.get_data(picks="eeg") * 1e6, dtype=np.float32)
     if not np.isfinite(cleaned_microvolt).all():
         raise FloatingPointError("MNE cleaning produced NaN or infinite values")
 
@@ -266,6 +282,7 @@ def clean_signal_with_mne(
         "muscle_score_summary": _score_summary(muscle_scores),
         "fit_errors": fit_errors,
         "detection_errors": detection_errors,
+        "eog_detection_channels": list(eog_names) if eog_names else ["Fp1", "Fp2"],
         "interpolated_bad_channels": interpolated_bad_channels,
         "channel_std_median_before_interpolation_microvolt": float(np.median(channel_std_before_interpolation) * 1e6),
         "channel_std_max_before_interpolation_microvolt": float(np.max(channel_std_before_interpolation) * 1e6),
@@ -373,7 +390,15 @@ def _load_or_build_cleaned_signal(
             raise FloatingPointError(f"Cached ICA signal contains NaN or infinite values: {signal_path}")
         return cleaned, ica_metadata, True
 
-    cleaned, ica_metadata = clean_signal_with_mne(record.signal, channel_names, montage, args)
+    cleaned, ica_metadata = clean_signal_with_mne(
+        record.signal,
+        channel_names,
+        montage,
+        args,
+        eog_signal_microvolt=getattr(record, "eog_signal", None),
+        eog_names=tuple(getattr(record, "eog_names", ())),
+    )
+    record_metadata = dict(getattr(record, "metadata", None) or {})
     write_npz(
         signal_path,
         cleaned=cleaned.astype(np.float32),
@@ -383,6 +408,7 @@ def _load_or_build_cleaned_signal(
         trial=np.int64(record.trial),
         cleaning_signature=np.asarray(cleaning_signature),
         ica_metadata_json=np.asarray(json.dumps(ica_metadata, sort_keys=True, separators=(",", ":"))),
+        record_metadata_json=np.asarray(json.dumps(record_metadata, sort_keys=True, separators=(",", ":"))),
     )
     write_json(
         metadata_path,
@@ -393,6 +419,7 @@ def _load_or_build_cleaned_signal(
             "cleaned_shape": list(cleaned.shape),
             "cleaning_signature": cleaning_signature,
             "ica": ica_metadata,
+            "record_metadata": record_metadata,
         },
     )
     return cleaned, ica_metadata, False
@@ -436,6 +463,7 @@ def _entry_from_files(root: Path, record: Any, source_index: int, signature: str
         "p_hist_shape": phist_shape,
         "preprocessing_signature": signature,
         "ica": metadata["ica"],
+        "record_metadata": metadata.get("record_metadata", {}),
     }
 
 
@@ -491,6 +519,13 @@ def build_trial_features(
                     trial=np.int64(record.trial),
                     source_index=np.int64(source_index),
                     preprocessing_signature=np.asarray(signature),
+                    record_metadata_json=np.asarray(
+                        json.dumps(
+                            dict(getattr(record, "metadata", None) or {}),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    ),
                 )
                 write_json(
                     metadata_path,
@@ -501,6 +536,7 @@ def build_trial_features(
                         "ica": ica_metadata,
                         "ica_cache_path": str(ica_cache_root / "trials" / f"{record.trial_id}.npz"),
                         "cleaning_signature": cleaning_signature,
+                        "record_metadata": dict(getattr(record, "metadata", None) or {}),
                         "de_shape": list(de.shape),
                         "p_hist_shape": list(p_hist.shape),
                     },
@@ -658,11 +694,14 @@ def build_one_fold(
         {
             "schema_version": 1,
             "complete": True,
-            "dataset": "SEED-IV" if config.dataset == "seediv" else "SEED",
+            "dataset": {"seed": "SEED", "seediv": "SEED-IV", "deap": "DEAP"}[config.dataset],
             "features": ["de", "rjsd"],
             "target_subject": target_subject,
             "preprocessing_signature": signature,
-            "feature_shapes": {"de": "[T,62,5]", "rjsd": "[T,62,5]"},
+            "feature_shapes": {
+                "de": f"[T,{int(config.raw['dataset']['channels'])},{len(BANDS)}]",
+                "rjsd": f"[T,{int(config.raw['dataset']['channels'])},{len(BANDS)}]",
+            },
             "split": split.as_dict(),
             "provenance": provenance,
             "groups": output_groups,
@@ -694,22 +733,29 @@ def build_folds(
     if not manifest.get("complete"):
         raise RuntimeError("Trial feature stage is incomplete; folds cannot be built safely")
     trials = list(manifest["trials"])
-    targets = [args.fold] if args.fold is not None else list(range(1, 16))
+    subject_count = int(config.raw["dataset"]["subjects"])
+    targets = [args.fold] if args.fold is not None else list(range(1, subject_count + 1))
     for target in targets:
-        if not 1 <= int(target) <= 15:
-            raise ValueError(f"Fold must be in 1..15, got {target}")
+        if not 1 <= int(target) <= subject_count:
+            raise ValueError(f"Fold must be in 1..{subject_count}, got {target}")
         build_one_fold(config, root, trials, int(target), signature, args)
     complete_folds = sorted(path.name for path in (root / "folds").glob("fold-*") if (path / "manifest.json").is_file())
     write_json(
         root / "pipeline_manifest.json",
         {
             "schema_version": 1,
-            "dataset": "SEED-IV" if config.dataset == "seediv" else "SEED",
+            "dataset": {"seed": "SEED", "seediv": "SEED-IV", "deap": "DEAP"}[config.dataset],
             "features": ["de", "rjsd"],
             "preprocessing_signature": signature,
             "trial_stage_complete": True,
             "complete_folds": complete_folds,
-            "all_15_folds_complete": len(complete_folds) == 15,
+            "all_folds_complete": len(complete_folds) == subject_count,
+            "expected_folds": subject_count,
+            **(
+                {"all_15_folds_complete": len(complete_folds) == 15}
+                if subject_count == 15
+                else {}
+            ),
         },
     )
 

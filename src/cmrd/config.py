@@ -207,8 +207,8 @@ def validate_config(raw: dict[str, Any], expected_feature: str | None = None) ->
     _require(raw["experiment"], ("dataset", "feature", "model"), "experiment")
     dataset = str(raw["experiment"]["dataset"]).lower()
     feature = str(raw["experiment"]["feature"]).lower()
-    if dataset not in {"seed", "seediv"}:
-        raise ValueError(f"dataset must be seed or seediv, got {dataset!r}")
+    if dataset not in {"seed", "seediv", "deap"}:
+        raise ValueError(f"dataset must be seed, seediv, or deap, got {dataset!r}")
     if feature not in {"de", "rd"}:
         raise ValueError(f"feature must be de or rd, got {feature!r}")
     if expected_feature and feature != expected_feature:
@@ -216,8 +216,23 @@ def validate_config(raw: dict[str, Any], expected_feature: str | None = None) ->
     _require(raw["paths"], ("data_root", "processed_root", "run_root"), "paths")
     _require(raw["dataset"], ("raw_dir", "channels", "subjects", "classes"), "dataset")
     _require(raw["signal"], ("original_rate", "target_rate", "broad_band_hz", "filter_order", "window_seconds", "hop_seconds", "bands_hz"), "signal")
-    if int(raw["dataset"]["subjects"]) != 15 or int(raw["dataset"]["channels"]) != 62:
-        raise ValueError("SEED/SEED-IV baselines require exactly 15 subjects and 62 channels")
+    expected_shape = {"seed": (15, 62), "seediv": (15, 62), "deap": (32, 32)}[dataset]
+    actual_shape = (int(raw["dataset"]["subjects"]), int(raw["dataset"]["channels"]))
+    if actual_shape != expected_shape:
+        raise ValueError(
+            f"{dataset.upper()} requires subjects/channels={expected_shape}, got {actual_shape}"
+        )
+    if dataset == "deap":
+        _require(raw["dataset"], ("label_file", "label_target"), "DEAP dataset")
+        if str(raw["dataset"]["label_target"]).lower() not in {
+            "quadrant", "valence", "arousal"
+        }:
+            raise ValueError("DEAP label_target must be quadrant, valence, or arousal")
+        expected_classes = 4 if str(raw["dataset"]["label_target"]).lower() == "quadrant" else 2
+        if int(raw["dataset"]["classes"]) != expected_classes:
+            raise ValueError(
+                f"DEAP label_target={raw['dataset']['label_target']} requires classes={expected_classes}"
+            )
     bands = raw["signal"]["bands_hz"]
     if not isinstance(bands, dict) or len(bands) != 5:
         raise ValueError("Exactly five ordered frequency bands are required")

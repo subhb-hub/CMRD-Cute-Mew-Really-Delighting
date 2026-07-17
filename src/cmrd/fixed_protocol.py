@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import pickle
+import math
 from collections import defaultdict
 from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 import torch
@@ -15,7 +16,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from cmrd.data.records import TrialSample
-from cmrd.features.rd import normalize_histograms, transform_rd
+from cmrd.features.rd import normalize_histograms, transform_rd, transform_signed_sqrt_rd
 from cmrd.io import read_json
 from cmrd.models import HierarchicalChannelBandTransformer, PlainTransformer
 from cmrd.training.engine import (
@@ -30,6 +31,7 @@ from cmrd.training.runtime import seed_everything
 
 FIXED_SEED = 42
 REPRESENTATIONS = ("histogram", "de_raw", "de_zscore", "rjsd_zscore")
+EXPLORATORY_REPRESENTATIONS = (*REPRESENTATIONS, "srjsd_zscore")
 REFERENCE_METHODS = (
     "pooled_mean",
     "robust_median",
@@ -227,10 +229,34 @@ def load_rjsd_samples(
     return samples
 
 
+def load_signed_sqrt_rjsd_samples(
+    root: Path,
+    entries: Iterable[dict[str, Any]],
+    reference: np.ndarray,
+    bands_hz: Sequence[Sequence[float]],
+    channels: int = 62,
+) -> list[TrialSample]:
+    samples = []
+    for entry in entries:
+        histogram = _load_histogram(root, entry)
+        flat = transform_signed_sqrt_rd(histogram, reference, bands_hz)
+        if flat.shape[1] % channels:
+            raise ValueError(f"sRJSD feature dimension {flat.shape[1]} is not divisible by {channels}")
+        samples.append(TrialSample(
+            np.ascontiguousarray(flat, dtype=np.float32),
+            int(entry["label"]),
+            int(entry["subject"]),
+            int(entry["session"]),
+            int(entry["trial"]),
+            int(entry["source_index"]),
+        ))
+    return samples
+
+
 def representation_uses_source_zscore(representation: str) -> bool:
-    if representation not in REPRESENTATIONS:
+    if representation not in EXPLORATORY_REPRESENTATIONS:
         raise ValueError(f"Unknown representation: {representation}")
-    return representation in {"de_zscore", "rjsd_zscore"}
+    return representation in {"de_zscore", "rjsd_zscore", "srjsd_zscore"}
 
 
 def load_representation_samples(
@@ -239,13 +265,18 @@ def load_representation_samples(
     representation: str,
     reference: np.ndarray | None = None,
     channels: int = 62,
+    bands_hz: Sequence[Sequence[float]] | None = None,
 ) -> list[TrialSample]:
     """Load one declared representation without fitting any data-dependent state."""
-    if representation not in REPRESENTATIONS:
+    if representation not in EXPLORATORY_REPRESENTATIONS:
         raise ValueError(f"Unknown representation: {representation}")
-    if representation == "rjsd_zscore":
+    if representation in {"rjsd_zscore", "srjsd_zscore"}:
         if reference is None:
             raise ValueError("RJSD requires an explicitly fitted source reference")
+        if representation == "srjsd_zscore":
+            if bands_hz is None:
+                raise ValueError("sRJSD requires ordered frequency-band limits")
+            return load_signed_sqrt_rjsd_samples(root, entries, reference, bands_hz, channels)
         return load_rjsd_samples(root, entries, reference, channels)
 
     samples: list[TrialSample] = []
@@ -610,6 +641,183 @@ def fit_locked_source_model(
         "source_zscore": scale_inputs,
         "context": context or {},
     }, checkpoint_path)
+
+
+def _warmup_cosine_scheduler(
+    optimizer: torch.optim.Optimizer,
+    total_updates: int,
+    warmup_fraction: float,
+    minimum_learning_rate: float,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    if total_updates < 1:
+        raise ValueError("total_updates must be positive")
+    if not 0.0 <= warmup_fraction < 1.0:
+        raise ValueError("warmup_fraction must be in [0, 1)")
+    base_lr = float(optimizer.param_groups[0]["lr"])
+    if base_lr <= 0:
+        raise ValueError("Optimizer learning rate must be positive")
+    minimum_ratio = float(minimum_learning_rate) / base_lr
+    if not 0.0 <= minimum_ratio <= 1.0:
+        raise ValueError("minimum_learning_rate must be between zero and the base learning rate")
+    warmup_updates = int(round(total_updates * warmup_fraction))
+
+    def multiplier(step: int) -> float:
+        if warmup_updates and step < warmup_updates:
+            return max((step + 1) / warmup_updates, 1.0 / warmup_updates)
+        cosine_updates = max(total_updates - warmup_updates, 1)
+        progress = min(max((step - warmup_updates) / cosine_updates, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return minimum_ratio + (1.0 - minimum_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
+
+
+def fit_exploratory_monitored_source_model(
+    source_samples: Sequence[TrialSample],
+    target_samples: Sequence[TrialSample],
+    model_config: dict[str, Any],
+    training: dict[str, Any],
+    classes: int,
+    device: torch.device,
+    checkpoint_path: Path,
+    seed: int = FIXED_SEED,
+    scale_inputs: bool = True,
+    context: dict[str, Any] | None = None,
+    normalization: tuple[np.ndarray, np.ndarray] | None = None,
+    monitor_callback: Callable[[Sequence[dict[str, Any]], Sequence[dict[str, Any]]], None] | None = None,
+) -> dict[str, Any]:
+    """Train to a fixed endpoint while recording target diagnostics.
+
+    This function is deliberately exploratory: target metrics are observed at
+    a fixed interval but never affect gradients, stopping, checkpoint choice,
+    or the predeclared final epoch.  Its artifacts must not be mixed with the
+    target-isolated fixed-protocol matrix.
+    """
+    if not source_samples or not target_samples:
+        raise ValueError("Exploratory monitoring requires non-empty source and target trials")
+    if str(model_config["name"]) == "small_mlp":
+        raise ValueError("sRJSD-Large-v1 only supports sequence models")
+    seed_everything(seed, bool(training.get("deterministic", True)))
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision(str(training.get("matmul_precision", "high")))
+
+    mean, std = normalization or scaling_statistics(source_samples, scale_inputs)
+    input_dim = int(source_samples[0].x.shape[1])
+    max_length = max(max(sample.x.shape[0] for sample in source_samples), max(sample.x.shape[0] for sample in target_samples))
+    model = build_model(model_config, input_dim, classes, max_length).to(device)
+    train_loader = _loader(
+        source_samples,
+        mean,
+        std,
+        int(training["batch_size"]),
+        True,
+        seed,
+        num_workers=int(training.get("num_workers", 0)),
+        persistent_workers=bool(training.get("persistent_workers", False)),
+        prefetch_factor=int(training.get("prefetch_factor", 1)),
+        cache_normalized=True,
+    )
+    target_loader = _loader(
+        target_samples,
+        mean,
+        std,
+        int(training["batch_size"]),
+        False,
+        seed,
+        cache_normalized=True,
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(training["learning_rate"]),
+        weight_decay=float(training["weight_decay"]),
+    )
+    criterion = nn.CrossEntropyLoss(label_smoothing=float(training.get("label_smoothing", 0.0)))
+    epochs = int(training["locked_epochs"])
+    monitor_interval = int(training.get("target_monitor_interval", 10))
+    accumulation = int(training.get("gradient_accumulation_steps", 1))
+    if epochs < 1 or monitor_interval < 1 or accumulation < 1:
+        raise ValueError("epochs, target_monitor_interval, and gradient accumulation must be positive")
+    updates_per_epoch = math.ceil(len(train_loader) / accumulation)
+    scheduler = _warmup_cosine_scheduler(
+        optimizer,
+        total_updates=epochs * updates_per_epoch,
+        warmup_fraction=float(training.get("warmup_fraction", 0.1)),
+        minimum_learning_rate=float(training.get("minimum_learning_rate", 1e-6)),
+    )
+    target_curve: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
+    try:
+        for epoch in range(1, epochs + 1):
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            loss_sum = 0.0
+            example_count = 0
+            for batch_index, (data, mask, labels) in enumerate(train_loader, 1):
+                valid_indices = (
+                    _valid_indices_on_device(mask, device)
+                    if isinstance(model, (HierarchicalChannelBandTransformer, HistogramHierarchicalTransformer))
+                    else None
+                )
+                data = data.to(device, non_blocking=True)
+                mask = mask.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                with _autocast(training, device):
+                    unscaled_loss = criterion(
+                        _forward_sequence_model(model, data, mask, valid_indices), labels
+                    )
+                    loss = unscaled_loss / accumulation
+                loss.backward()
+                loss_sum += float(unscaled_loss.detach().item()) * labels.shape[0]
+                example_count += int(labels.shape[0])
+                if batch_index % accumulation == 0 or batch_index == len(train_loader):
+                    nn.utils.clip_grad_norm_(
+                        model.parameters(), float(training.get("gradient_clip_norm", 1.0))
+                    )
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+            history.append({
+                "epoch": epoch,
+                "train_loss": loss_sum / max(example_count, 1),
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            })
+            if epoch % monitor_interval == 0 or epoch == epochs:
+                targets, predictions = predict_neural(
+                    model, target_loader, device, str(training.get("precision", "float32"))
+                )
+                target_curve.append({
+                    "epoch": epoch,
+                    **classification_metrics(targets, predictions, classes),
+                })
+                if monitor_callback is not None:
+                    monitor_callback(history, target_curve)
+    finally:
+        _shutdown_persistent_loader(train_loader)
+        _shutdown_persistent_loader(target_loader)
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "normalization_mean": mean,
+        "normalization_std": std,
+        "model": model_config,
+        "training": training,
+        "classes": classes,
+        "input_dim": input_dim,
+        "max_length": max_length,
+        "seed": seed,
+        "target_loaded": True,
+        "target_monitoring_during_training": True,
+        "checkpoint_selection": "fixed_final_epoch_only",
+        "source_zscore": scale_inputs,
+        "context": context or {},
+    }, checkpoint_path)
+    return {
+        "history": history,
+        "target_curve": target_curve,
+        "parameter_count": int(sum(parameter.numel() for parameter in model.parameters())),
+        "final_epoch": epochs,
+    }
 
 
 def _pooled_feature_statistics(features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
