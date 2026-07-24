@@ -1,0 +1,53 @@
+experiment:
+  name: faced_str_jsd_fold1_light
+  evidence_label: exploratory_source_selected_single_fold_light_ablation
+paths:
+  base_run_root: runs/faced_native_compact_base_seed42
+  run_root: runs/faced_str_jsd_fold1_light_seed42
+protocol:
+  fold: 1
+  seed: 42
+  development_subjects: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  evaluation_protocols:
+    - conventional_subject_holdout
+    - subject_and_stimulus_holdout
+  temporal_settings:
+    five_second_average:
+      response_average_windows: 5
+      conditions:
+        - C0_absolute_de
+        - C1_absolute_de_scalar_jsd
+        - C2_absolute_de_unsigned_pointwise_jsd
+        - C3_absolute_de_signed_pointwise_jsd
+        - C4_absolute_de_delta_de_signed_pointwise_jsd
+        - C5_absolute_de_pointwise_log_ratio
+        - C6_c4_reference_quality_gate
+    one_second_control:
+      response_average_windows: 1
+      conditions:
+        - C0_absolute_de
+        - C4_absolute_de_delta_de_signed_pointwise_jsd
+        - C5_absolute_de_pointwise_log_ratio
+model:
+  channels: 30
+  classes: 9
+  d_model: 64
+  heads: 4
+  layers: 2
+  feedforward: 256
+  dropout: 0.15
+training:
+  epochs: 15
+  batch_subjects: 8
+  batch_emotions: 8
+  learning_rate: 0.0003
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.01
+  label_smoothing: 0.05
+  gradient_clip_norm: 1.0
+  precision: bfloat16
+  device: auto
+  deterministic: true
+  evaluation_batch_size: 128
+  probe_c: 1.0
+  bootstrap_repeats: 2000

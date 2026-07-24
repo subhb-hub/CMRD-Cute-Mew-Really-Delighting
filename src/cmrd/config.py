@@ -207,8 +207,8 @@ def validate_config(raw: dict[str, Any], expected_feature: str | None = None) ->
     _require(raw["experiment"], ("dataset", "feature", "model"), "experiment")
     dataset = str(raw["experiment"]["dataset"]).lower()
     feature = str(raw["experiment"]["feature"]).lower()
-    if dataset not in {"seed", "seediv", "deap"}:
-        raise ValueError(f"dataset must be seed, seediv, or deap, got {dataset!r}")
+    if dataset not in {"seed", "seediv", "deap", "faced"}:
+        raise ValueError(f"dataset must be seed, seediv, deap, or faced, got {dataset!r}")
     if feature not in {"de", "rd"}:
         raise ValueError(f"feature must be de or rd, got {feature!r}")
     if expected_feature and feature != expected_feature:
@@ -216,7 +216,12 @@ def validate_config(raw: dict[str, Any], expected_feature: str | None = None) ->
     _require(raw["paths"], ("data_root", "processed_root", "run_root"), "paths")
     _require(raw["dataset"], ("raw_dir", "channels", "subjects", "classes"), "dataset")
     _require(raw["signal"], ("original_rate", "target_rate", "broad_band_hz", "filter_order", "window_seconds", "hop_seconds", "bands_hz"), "signal")
-    expected_shape = {"seed": (15, 62), "seediv": (15, 62), "deap": (32, 32)}[dataset]
+    expected_shape = {
+        "seed": (15, 62),
+        "seediv": (15, 62),
+        "deap": (32, 32),
+        "faced": (123, 30),
+    }[dataset]
     actual_shape = (int(raw["dataset"]["subjects"]), int(raw["dataset"]["channels"]))
     if actual_shape != expected_shape:
         raise ValueError(
@@ -233,10 +238,23 @@ def validate_config(raw: dict[str, Any], expected_feature: str | None = None) ->
             raise ValueError(
                 f"DEAP label_target={raw['dataset']['label_target']} requires classes={expected_classes}"
             )
+    if dataset == "faced":
+        _require(raw["dataset"], ("metadata_dir", "label_target", "recorded_channels"), "FACED dataset")
+        if str(raw["dataset"]["label_target"]).lower() != "emotion_9":
+            raise ValueError("FACED label_target must be emotion_9")
+        if int(raw["dataset"]["classes"]) != 9:
+            raise ValueError("FACED emotion_9 requires classes=9")
+        if int(raw["dataset"]["recorded_channels"]) != 32:
+            raise ValueError("FACED Processed_data must declare recorded_channels=32")
     bands = raw["signal"]["bands_hz"]
     if not isinstance(bands, dict) or len(bands) != 5:
         raise ValueError("Exactly five ordered frequency bands are required")
-    if int(raw["split"].get("validation_subjects", 0)) != 2:
+    if dataset == "faced":
+        if str(raw["split"].get("protocol", "")).lower() != "official_subject_10fold":
+            raise ValueError("FACED requires split.protocol=official_subject_10fold")
+        if int(raw["split"].get("folds", 0)) != 10:
+            raise ValueError("FACED requires split.folds=10")
+    elif int(raw["split"].get("validation_subjects", 0)) != 2:
         raise ValueError("Protocol requires exactly two complete source validation subjects")
     if int(raw["model"]["d_model"]) % int(raw["model"]["nhead"]) != 0:
         raise ValueError("model.d_model must be divisible by model.nhead")

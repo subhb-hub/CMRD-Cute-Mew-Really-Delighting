@@ -163,7 +163,7 @@ selection for every requested fold.
 
 ## Scientific protocol
 
-- Both datasets use 62 channels, 200 Hz signals, non-overlapping 1 s windows,
+- SEED and SEED-IV use 62 channels, 200 Hz signals, non-overlapping 1 s windows,
   and delta/theta/alpha/beta/gamma bands.
 - DE is `0.5 * log(2*pi*e*variance + eps)` after full-trial band filtering.
 - RD is Jensen-Shannon divergence between each spectral histogram and a
@@ -314,3 +314,86 @@ representation after `-Stage Lock`. `-Dataset Seed` and `-Dataset SeedIV`
 restrict execution to one dataset. Artifacts are isolated under
 `runs/native_compact_v1_seed42/`; `-Stage Status` reads progress without
 starting work.
+
+For DEAP, the dedicated fold-1 entry point runs only native square-root JSD and
+the unsupervised Fisher-Rao tangent PCA coordinate. Each window is flattened
+from `[32,5]` to 160 scalars. The reference distribution, Fisher-Rao PCA state,
+and z-score statistics are fitted from the 29 source-train subjects; those
+states are frozen before the two source-validation subjects and target subject
+are loaded. The final Base/v2 model reunites all 31 non-target subjects and
+records target metrics every 10 epochs without target-driven checkpoint
+selection.
+
+```powershell
+# Read-only cache/deep-audit check.
+.\scripts\run_deap_native_compact.ps1 -Stage Validate
+
+# Optional two-epoch integration smoke test (isolated output directory).
+.\scripts\run_deap_native_compact.ps1 -Stage Smoke
+
+# Lock the 200-epoch protocol, then run both fold-1 representations.
+.\scripts\run_deap_native_compact.ps1 -Stage Lock
+.\scripts\run_deap_native_compact.ps1 -Stage Fold1 -Resume -RetryFailed
+.\scripts\run_deap_native_compact.ps1 -Stage Summarize
+```
+
+`-Stage SqrtJsd` and `-Stage FisherRao` run one condition at a time. Feature
+generation reads the reusable DEAP ICA time-series cache directly and does not
+use the cached 32-bin histograms.
+
+## FACED Processed_data native compact experiment
+
+FACED uses its official `Processed_data` directly. The runner does not filter,
+resample, interpolate, run ICA, or rereference again. It audits the 123
+`sub000.pkl`-`sub122.pkl` arrays as `[28,32,7500]`, verifies the accompanying
+metadata checksums where available, and records the published 28-video label
+map and harmonized cohort-2 channel order. Behavioural ratings and demographics
+are retained as provenance only and never enter the classifier.
+
+The official validation code excludes the final two harmonized mastoid channels
+(A1/A2 in cohort 1, corresponding to HEOR/HEOL in cohort 2), so the experiment
+audits all 32 stored channels but extracts features from the first 30 EEG
+channels. The experiment follows FACED's official contiguous subject 10-fold split:
+folds 1-9 contain 12 target subjects each and fold 10 contains 15. For every
+outer fold, all probability references, Fisher-Rao tangent PC1 axes, and input
+z-score statistics are fitted only from the other nine folds. Each 30-second
+trial becomes a sequence of 30 non-overlapping one-second windows with 150
+features (`30 channels x 5 bands`). Target features use the frozen source state;
+target arrays are loaded for evaluation only after the fixed final checkpoint.
+
+The comparison includes the two source-referenced probability-geometry
+features plus a five-band DE baseline extracted from the same one-second
+windows. DE uses fourth-order band-specific Butterworth filtering as feature
+extraction; it does not repeat the broad-band cleanup pipeline. All three
+representations have the same `[30,150]` trial shape and source-only z-score.
+
+The Base `HierarchicalChannelBandTransformer` remains `d_model=128`, four
+heads, three temporal layers, feed-forward width 512, and dropout 0.15. The
+FACED adaptation uses 100 fixed epochs, batch size 64, AdamW at `3e-4`, cosine
+decay to `1e-6`, weight decay 0.01, label smoothing 0.05, gradient clipping at
+1.0, and bfloat16 when supported. No target monitoring or early stopping is
+used.
+
+```powershell
+# Fast structural audit (five representative subjects); add DeepValidate to
+# read and finite-check every Processed_data file.
+.\scripts\run_faced_native_compact.ps1 -Stage Validate
+
+# Optional three-subject/two-epoch integration check in an isolated smoke root.
+.\scripts\run_faced_native_compact.ps1 -Stage Smoke
+
+# Build the reusable native 250-point probability spectra once, then lock.
+.\scripts\run_faced_native_compact.ps1 -Stage Spectra
+.\scripts\run_faced_native_compact.ps1 -Stage Lock
+
+# Run all three representations for fold 1, or omit -Folds for the full 30-task matrix.
+.\scripts\run_faced_native_compact.ps1 -Stage Fold -Folds 1 -Resume -RetryFailed
+.\scripts\run_faced_native_compact.ps1 -Stage Matrix -Resume -RetryFailed
+.\scripts\run_faced_native_compact.ps1 -Stage Summarize
+```
+
+`-Stage DE`, `-Stage SqrtJsd`, and `-Stage FisherRao` select one representation
+and accept the same optional `-Folds` filter. Feature preparation resumes per subject. `Matrix`
+also prepares a fold's source-only feature state and compact subject files on
+demand after the reusable spectra cache exists. Outputs are isolated under
+`runs/faced_native_compact_base_seed42/`.

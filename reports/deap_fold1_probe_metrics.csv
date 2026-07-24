@@ -1,0 +1,13 @@
+representation,classifier,fit_scope,evaluation,n,accuracy,balanced_accuracy,macro_f1
+sqrt-JSD,logistic-unweighted,29 source-train,2 source-validation,80,0.2625,0.2707729468599034,0.2319691706469822
+sqrt-JSD,logistic-unweighted,29 source-train,target subject 1,40,0.225,0.19405594405594406,0.15073529411764708
+sqrt-JSD,logistic-unweighted,31 all-source,target subject 1,40,0.25,0.21328671328671328,0.1657142857142857
+sqrt-JSD,logistic-balanced,29 source-train,2 source-validation,80,0.2125,0.23051529790660225,0.1889010989010989
+sqrt-JSD,logistic-balanced,29 source-train,target subject 1,40,0.225,0.19405594405594406,0.15073529411764708
+sqrt-JSD,logistic-balanced,31 all-source,target subject 1,40,0.225,0.19405594405594406,0.14583333333333331
+Fisher–Rao PC1,logistic-unweighted,29 source-train,2 source-validation,80,0.1625,0.2034621578099839,0.1424718105106449
+Fisher–Rao PC1,logistic-unweighted,29 source-train,target subject 1,40,0.175,0.16054778554778554,0.13898467432950193
+Fisher–Rao PC1,logistic-unweighted,31 all-source,target subject 1,40,0.15,0.13782051282051283,0.11120689655172414
+Fisher–Rao PC1,logistic-balanced,29 source-train,2 source-validation,80,0.2,0.2534621578099839,0.17217261904761905
+Fisher–Rao PC1,logistic-balanced,29 source-train,target subject 1,40,0.175,0.16981351981351983,0.1746031746031746
+Fisher–Rao PC1,logistic-balanced,31 all-source,target subject 1,40,0.2,0.18677156177156176,0.17692307692307693

@@ -1,0 +1,21 @@
+experiment:
+  name: faced_normative_probe_fold1
+  evidence_label: exploratory_pseudo_reference_diagnostic
+paths:
+  base_run_root: runs/faced_native_compact_base_seed42
+  run_root: runs/faced_normative_probe_fold1_seed42
+probe:
+  fold: 1
+  seed: 42
+  development_subjects: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  pseudo_reference_windows: 5
+  response_start_window: 5
+  prototype_counts: [2, 3, 4]
+  shrinkage_weights: [0.25, 0.5, 0.75]
+  bootstrap_repeats: 2000
+  heldout_video_policy: last_video_per_emotion
+  classifier:
+    name: shrinkage_lda
+    solver: lsqr
+    shrinkage: auto
+

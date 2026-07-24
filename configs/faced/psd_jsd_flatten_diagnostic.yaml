@@ -1,0 +1,66 @@
+experiment:
+  name: faced_psd_jsd_flatten_diagnostic
+  evidence_label: source_only_full_scale_optimization_diagnostic
+  parent_protocol: 53354d5f5dc33711
+  hypothesis: preserving fixed channel-band identity avoids symmetric pooling collapse
+
+paths:
+  spectra_root: runs/faced_native_compact_base_seed42/cache/native_spectra/aa535efcfb9084d7
+  run_root: runs/faced_psd_jsd_flatten_diagnostic_seed42
+
+protocol:
+  outer_fold: 1
+  seed: 42
+  inner_folds: 3
+  smoke_train_subjects: 74
+  smoke_development_subjects: 37
+  target_policy: locked_and_unread_during_all_config_selection
+
+feature:
+  name: frequency_resolved_sqrt_jsd_to_inner_train_mean_psd
+  epsilon: 1.0e-12
+  storage_dtype: float16
+  standardization: inner_train_only_per_channel_band_frequency
+
+sanity:
+  samples_per_class: 2
+  maximum_steps: 500
+  learning_rate: 0.001
+  target_accuracy: 0.99
+  target_loss: 0.05
+  dropout: 0.0
+  weight_decay: 0.0
+  label_smoothing: 0.0
+  gradient_clipping: disabled
+
+training:
+  seed: 42
+  device: auto
+  deterministic: true
+  epochs: 40
+  smoke_epochs: 40
+  batch_size: 16
+  evaluation_batch_size: 64
+  learning_rate: 0.001
+  minimum_learning_rate: 0.00001
+  warmup_fraction: 0.05
+  weight_decay: 0.0
+  label_smoothing: 0.0
+  gradient_clip_norm: 0.0
+  precision: float32
+  num_workers: 0
+  selection_gate:
+    minimum_train_margin: 0.05
+    minimum_dev_margin: 0.001
+    minimum_predicted_classes: 3
+
+candidates:
+  native_band_flatten_clean:
+    model: native_band_flatten
+    frequency_hidden: 32
+    band_dim: 8
+    d_model: 64
+    heads: 4
+    temporal_layers: 2
+    feedforward: 256
+    dropout: 0.0

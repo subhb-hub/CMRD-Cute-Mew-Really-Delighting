@@ -1,0 +1,133 @@
+experiment:
+  dataset: faced
+  feature: rd
+  model: slst
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs/slst_v1
+dataset:
+  raw_dir: Ori/FACED/Processed_data
+  metadata_dir: Ori/FACED
+  label_target: emotion_9
+  channels: 30
+  recorded_channels: 32
+  subjects: 123
+  classes: 9
+signal:
+  original_rate: 250
+  target_rate: 250
+  broad_band_hz: [0.05, 47.0]
+  filter_order: 4
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 30.0]
+    gamma: [30.0, 47.0]
+feature:
+  name: structured_landmark_spectral
+  hist_bins_per_band: 0
+  spectral_nfft: 250
+  storage_dtype: float16
+split:
+  protocol: official_subject_10fold
+  folds: 10
+  seed: 42
+model:
+  d_model: 128
+  nhead: 8
+  max_length: 30
+  band_heads: 4
+  channel_heads: 8
+  temporal_heads: 8
+  band_layers: 2
+  channel_layers: 2
+  temporal_layers: 3
+  feedforward: 512
+  dropout: 0.2
+training:
+  seeds: [42, 52, 62]
+  device: auto
+  deterministic: true
+  epochs: 80
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  label_smoothing: 0.05
+  gradient_clip_norm: 1.0
+  evaluation_batch_size: 8
+  num_workers: 0
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: false
+  selection_file: ""
+  architectures: []
+  optimizations: []
+output:
+  save_checkpoints: true
+
+# This section keeps the already validated base PSD/DE cache builder frozen.
+spectral_atlas:
+  seed: 42
+  folds: [1]
+  protocols: [conventional_subject_holdout, subject_and_stimulus_holdout]
+  caps: [1, 2, 4, 8]
+  development_subjects: 12
+  candidate_windows_per_trial: 2
+  maximum_anchor_candidates: 8192
+  landmark_ridge: 0.000001
+  monitor_interval: 10
+  pooling: mean_std
+  models: [logistic_regression, linear_svm, pooled_mlp]
+  conditions:
+    - de
+    - log_band_power
+    - scalar_jsd_power
+    - ilr_power_full
+    - log_psd_full
+    - raw_landmark_power_cap1
+    - nystrom_landmark_power_cap1
+    - pca_ilr_power_cap1
+    - random_ilr_power_cap1
+    - raw_landmark_power_cap2
+    - nystrom_landmark_power_cap2
+    - pca_ilr_power_cap2
+    - random_ilr_power_cap2
+    - raw_landmark_power_cap4
+    - nystrom_landmark_power_cap4
+    - pca_ilr_power_cap4
+    - random_ilr_power_cap4
+    - raw_landmark_power_cap8
+    - nystrom_landmark_power_cap8
+    - pca_ilr_power_cap8
+    - random_ilr_power_cap8
+
+slst:
+  base_cache_run_root: runs/spectral_atlas_v1_seed42
+  folds: [1, 5, 10]
+  protocols: [conventional_subject_holdout]
+  seeds: [42, 52, 62]
+  landmarks: 8
+  candidate_windows_per_trial: 2
+  maximum_candidates: 8192
+  gram_ridge: 0.0001
+  monitor_interval: 10
+  target_monitoring: true
+  conditions: [A0_magnitude, A1_de, A2_full_shape, A3_scalar_rjsd, A4_raw_landmark, A5_centered_landmark, A6_hilbert_landmark, C1_random_learnable, C2_learnable, C3_anchor, C4_regularized]
+  architectures: [B0_flatten_mlp, B1_flatten_temporal, B2_band_temporal, B3_channel_temporal, B4_slst]
+  anchor_weight: 0.01
+  diversity_weight: 0.01
+  coverage_weight: 0.01
+  diversity_margin: 0.1
+  coverage_temperature: 0.05
+  freeze_landmark_epochs: 12
+  landmark_learning_rate: 0.00003
+  subjects_per_batch: 8
+  trials_per_subject: 1
+  gradient_accumulation: 2
+  early_stopping_patience_monitors: 3
+  vrex_weight: 0.0

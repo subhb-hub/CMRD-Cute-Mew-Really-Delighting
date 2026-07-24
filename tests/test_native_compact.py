@@ -21,8 +21,11 @@ from cmrd.features.rd import (
     transform_native_sqrt_jsd,
     transform_native_wasserstein1,
 )
+from cmrd.fixed_protocol import build_model
 from cmrd.native_compact_runner import (
+    DEAP_EXPECTED_CONDITIONS,
     EXPECTED_CONDITIONS,
+    _feature_dim,
     _fit_pca_state,
     _fit_reference_state,
     declared_tasks,
@@ -166,6 +169,46 @@ class NativeCompactRunnerTests(unittest.TestCase):
         self.assertEqual({task["architecture"] for task in tasks}, {"base"})
         self.assertEqual(settings["max_epochs"], 200)
         self.assertEqual(settings["target_monitor_interval"], 10)
+
+    def test_deap_config_uses_two_conditions_and_160_features(self) -> None:
+        config = load_config(ROOT / "configs" / "native_compact" / "deap_v1.yaml")
+        settings = experiment_settings(config)
+        tasks = declared_tasks(config, "deap-protocol")
+        self.assertEqual(tuple(settings["conditions"]), DEAP_EXPECTED_CONDITIONS)
+        self.assertEqual(settings["reference_scope"], "source_train")
+        self.assertEqual(_feature_dim(config), 160)
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({task["representation"] for task in tasks}, {
+            "native_sqrt_jsd_zscore", "native_fisher_rao_pca_zscore",
+        })
+        model = build_model({
+            "name": "hierarchical_attention",
+            "channels": 32,
+            "d_model": 32,
+            "heads": 4,
+            "layers": 1,
+            "feedforward": 64,
+            "dropout": 0.0,
+        }, input_dim=160, classes=4, max_length=60)
+        self.assertEqual(model.channels, 32)
+        self.assertEqual(model.feature_slots, 5)
+
+    def test_deap_powershell_defaults_to_cmrd_and_fold1_pair(self) -> None:
+        script = (ROOT / "scripts" / "run_deap_native_compact.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('[string]$CondaEnv = "cmrd"', script)
+        self.assertIn('"Fold1"', script)
+        self.assertIn("a_native_sqrt_jsd_base_v2", script)
+        self.assertIn("b_native_fisher_rao_pca_base_v2", script)
+
+    def test_deap_de_baseline_powershell_defaults_to_cmrd(self) -> None:
+        script = (ROOT / "scripts" / "run_deap_de_baseline.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('[string]$CondaEnv = "cmrd"', script)
+        self.assertIn("run_deap_de_baseline.py", script)
+        self.assertIn("deap_de_baseline_v1_seed42", script)
 
     def test_powershell_defaults_to_cmrd_conda_environment(self) -> None:
         script = (ROOT / "scripts" / "run_native_compact.ps1").read_text(encoding="utf-8")

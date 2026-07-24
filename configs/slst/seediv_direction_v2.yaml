@@ -1,0 +1,147 @@
+experiment:
+  dataset: seediv
+  feature: rd
+  model: slst
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs/slst_direction_v2
+dataset:
+  raw_dir: Ori/SEED-IV/eeg_raw_data
+  channels: 62
+  subjects: 15
+  classes: 4
+signal:
+  original_rate: 200
+  target_rate: 200
+  broad_band_hz: [1.0, 75.0]
+  filter_order: 4
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 31.0]
+    gamma: [31.0, 50.0]
+feature:
+  name: structured_landmark_spectral
+  hist_bins_per_band: 0
+  spectral_nfft: 200
+  storage_dtype: float16
+split:
+  protocol: loso
+  validation_subjects: 2
+  seed: 42
+model:
+  d_model: 128
+  nhead: 8
+  max_length: 300
+  band_heads: 4
+  channel_heads: 8
+  temporal_heads: 8
+  band_layers: 2
+  channel_layers: 2
+  temporal_layers: 3
+  feedforward: 512
+  dropout: 0.2
+training:
+  seeds: [42]
+  device: auto
+  deterministic: true
+  epochs: 80
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  label_smoothing: 0.05
+  gradient_clip_norm: 1.0
+  evaluation_batch_size: 4
+  num_workers: 0
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: false
+  selection_file: ""
+  architectures: []
+  optimizations: []
+output:
+  save_checkpoints: true
+
+spectral_atlas:
+  seed: 42
+  folds: [1, 8]
+  protocols: [loso]
+  caps: [1, 2, 4, 8]
+  development_subjects: 2
+  candidate_windows_per_trial: 2
+  maximum_anchor_candidates: 8192
+  landmark_ridge: 0.000001
+  monitor_interval: 10
+  pooling: mean_std
+  models: [logistic_regression, linear_svm, pooled_mlp]
+  conditions:
+    - de
+    - log_band_power
+    - scalar_jsd_power
+    - ilr_power_full
+    - log_psd_full
+    - raw_landmark_power_cap1
+    - nystrom_landmark_power_cap1
+    - pca_ilr_power_cap1
+    - random_ilr_power_cap1
+    - raw_landmark_power_cap2
+    - nystrom_landmark_power_cap2
+    - pca_ilr_power_cap2
+    - random_ilr_power_cap2
+    - raw_landmark_power_cap4
+    - nystrom_landmark_power_cap4
+    - pca_ilr_power_cap4
+    - random_ilr_power_cap4
+    - raw_landmark_power_cap8
+    - nystrom_landmark_power_cap8
+    - pca_ilr_power_cap8
+    - random_ilr_power_cap8
+
+slst:
+  base_cache_run_root: runs/spectral_atlas_v1_seed42
+  folds: [1, 8]
+  protocols: [loso]
+  seeds: [42]
+  landmarks: 8
+  direction_rank: 4
+  candidate_windows_per_trial: 2
+  maximum_candidates: 8192
+  gram_ridge: 0.0001
+  eigenvalue_floor_ratio: 0.001
+  effective_rank_tolerance: 0.000001
+  source_diagnostic_batches: 8
+  landmark_gradient_diagnostics: true
+  monitor_interval: 10
+  target_monitoring: true
+  conditions:
+    - H0_scalar_explicit
+    - H1_raw_inner_explicit
+    - H2_pca_lowrank_explicit
+    - H3_hilbert_lowrank_explicit
+    - H4_stable_hilbert_lowrank_explicit
+    - H5_hilbert_full_explicit
+    - H6_stable_hilbert_lowrank_residual
+    - L0_fixed
+    - L1_lr3e5_freeze3
+    - L2_lr1e4_freeze3
+    - L3_lr3e4_freeze3
+    - L4_lr1e4_unfrozen
+    - L5_lr1e4_regularized
+  architectures: [B4_slst]
+  anchor_weight: 0.01
+  diversity_weight: 0.01
+  coverage_weight: 0.01
+  diversity_margin: 0.1
+  coverage_temperature: 0.05
+  freeze_landmark_epochs: 3
+  landmark_learning_rate: 0.0001
+  subjects_per_batch: 4
+  trials_per_subject: 1
+  gradient_accumulation: 4
+  early_stopping_patience_monitors: 3
+  vrex_weight: 0.0

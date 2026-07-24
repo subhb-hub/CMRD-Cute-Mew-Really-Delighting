@@ -48,6 +48,7 @@ EXPECTED_CONDITIONS = (
     "b_native_fisher_rao_pca_base_v2",
     "c_native_wasserstein1_base_v2",
 )
+DEAP_EXPECTED_CONDITIONS = EXPECTED_CONDITIONS[:2]
 CONDITION_REPRESENTATIONS = {
     "a_native_sqrt_jsd_base_v2": "native_sqrt_jsd_zscore",
     "b_native_fisher_rao_pca_base_v2": "native_fisher_rao_pca_zscore",
@@ -58,6 +59,26 @@ REPRESENTATION_KEYS = {
     "native_fisher_rao_pca_zscore": "native_fisher_rao_pca",
     "native_wasserstein1_zscore": "native_wasserstein1",
 }
+
+
+def _expected_conditions(config: ExperimentConfig) -> tuple[str, ...]:
+    return DEAP_EXPECTED_CONDITIONS if config.dataset == "deap" else EXPECTED_CONDITIONS
+
+
+def _feature_dim(config: ExperimentConfig) -> int:
+    return int(config.raw["dataset"]["channels"]) * len(config.raw["signal"]["bands_hz"])
+
+
+def _active_representation_keys(config: ExperimentConfig) -> dict[str, str]:
+    representations = {
+        CONDITION_REPRESENTATIONS[condition]
+        for condition in _expected_conditions(config)
+    }
+    return {
+        representation: key
+        for representation, key in REPRESENTATION_KEYS.items()
+        if representation in representations
+    }
 
 
 def utc_now() -> str:
@@ -90,6 +111,9 @@ def experiment_settings(config: ExperimentConfig) -> dict[str, Any]:
         "max_epochs": int(raw.get("max_epochs", 200)),
         "target_monitor_interval": int(raw.get("target_monitor_interval", 10)),
         "pca_max_windows_per_trial": int(raw.get("pca_max_windows_per_trial", 32)),
+        "reference_scope": str(raw.get(
+            "reference_scope", "source_train" if config.dataset == "deap" else "all_source"
+        )),
         "conditions": copy.deepcopy(raw.get("conditions", {})),
         "architecture": copy.deepcopy(raw.get("architecture", {})),
     }
@@ -99,9 +123,15 @@ def experiment_settings(config: ExperimentConfig) -> dict[str, Any]:
         raise ValueError("Native-Compact-v1 requires v2 max_epochs=200 and 10-epoch monitoring")
     if settings["pca_max_windows_per_trial"] < 2:
         raise ValueError("pca_max_windows_per_trial must be at least 2")
-    if tuple(settings["conditions"]) != EXPECTED_CONDITIONS:
-        raise ValueError(f"Conditions must be declared in this order: {EXPECTED_CONDITIONS}")
-    for condition, representation in CONDITION_REPRESENTATIONS.items():
+    expected_conditions = _expected_conditions(config)
+    if tuple(settings["conditions"]) != expected_conditions:
+        raise ValueError(f"Conditions must be declared in this order: {expected_conditions}")
+    if settings["reference_scope"] not in {"all_source", "source_train"}:
+        raise ValueError("native_compact.reference_scope must be all_source or source_train")
+    if config.dataset == "deap" and settings["reference_scope"] != "source_train":
+        raise ValueError("DEAP native features must fit reference/PCA on source_train only")
+    for condition in expected_conditions:
+        representation = CONDITION_REPRESENTATIONS[condition]
         definition = settings["conditions"][condition]
         if str(definition.get("representation")) != representation:
             raise ValueError(f"Condition {condition} must use {representation}")
@@ -156,22 +186,124 @@ def experiment_settings(config: ExperimentConfig) -> dict[str, Any]:
     return settings
 
 
-def _fold_entries(cache_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _fold_groups(
+    cache_root: Path,
+    config: ExperimentConfig,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     manifest = read_json(cache_root / "folds" / "fold-01" / "manifest.json")
-    source = list(manifest["groups"]["train"]) + list(manifest["groups"]["validation"])
+    train = list(manifest["groups"]["train"])
+    validation = list(manifest["groups"]["validation"])
     target = list(manifest["groups"]["test"])
+    source = train + validation
     source_subjects = {int(entry["subject"]) for entry in source}
+    train_subjects = {int(entry["subject"]) for entry in train}
+    validation_subjects = {int(entry["subject"]) for entry in validation}
     target_subjects = {int(entry["subject"]) for entry in target}
-    if len(source_subjects) != 14 or FOLD in source_subjects or target_subjects != {FOLD}:
-        raise ValueError("Native-Compact-v1 requires the valid fold-1 14-source/1-target split")
+    subjects = int(config.raw["dataset"]["subjects"])
+    validation_count = int(config.raw["split"]["validation_subjects"])
+    expected_subjects = set(range(1, subjects + 1))
+    if (
+        len(source_subjects) != subjects - 1
+        or len(train_subjects) != subjects - 1 - validation_count
+        or len(validation_subjects) != validation_count
+        or train_subjects & validation_subjects
+        or source_subjects != expected_subjects - {FOLD}
+        or target_subjects != {FOLD}
+    ):
+        raise ValueError(
+            f"Native-Compact-v1 requires a valid fold-1 {subjects - 1}-source/1-target split"
+        )
+    return train, validation, target
+
+
+def _fold_entries(
+    cache_root: Path,
+    config: ExperimentConfig,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    train, validation, target = _fold_groups(cache_root, config)
+    source = train + validation
     return source, target
+
+
+def _validate_deap_cache(
+    config: ExperimentConfig,
+    cache_parent: Path | None,
+) -> dict[str, Any]:
+    parent = (
+        cache_parent
+        or config.processed_root / "deap" / "de_rjsd_ica_1s_hop1"
+    ).resolve()
+    if (parent / "pipeline_manifest.json").is_file():
+        candidates = [parent]
+    elif parent.is_dir():
+        candidates = sorted(
+            (path for path in parent.iterdir() if (path / "pipeline_manifest.json").is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    else:
+        candidates = []
+    cache_root: Path | None = None
+    pipeline: dict[str, Any] | None = None
+    for candidate in candidates:
+        value = read_json(candidate / "pipeline_manifest.json")
+        if (
+            value.get("dataset") == "DEAP"
+            and value.get("all_folds_complete") is True
+            and int(value.get("expected_folds", 0)) == 32
+        ):
+            cache_root = candidate
+            pipeline = value
+            break
+    if cache_root is None or pipeline is None:
+        raise FileNotFoundError(f"No complete DEAP cache under {parent}")
+
+    validation_path = cache_root / "validation.json"
+    if not validation_path.is_file():
+        raise FileNotFoundError(f"Missing DEAP deep validation result: {validation_path}")
+    validation = read_json(validation_path)
+    required = {
+        "status": "valid",
+        "deep": True,
+        "subjects": 32,
+        "trials": 1280,
+        "folds_checked": 32,
+        "strict_ica_detection_error_trials": 0,
+    }
+    mismatches = {
+        key: {"expected": expected, "actual": validation.get(key)}
+        for key, expected in required.items()
+        if validation.get(key) != expected
+    }
+    if mismatches:
+        raise ValueError(f"DEAP cache failed its required deep audit: {mismatches}")
+    train, validation_entries, target = _fold_groups(cache_root, config)
+    signature = str(pipeline["preprocessing_signature"])
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "dataset": config.dataset,
+        "cache_root": str(cache_root),
+        "preprocessing_signature": signature,
+        "outer_protocol": "32-fold LOSO: 31 source subjects / 1 target subject",
+        "cache_diagnostic_split": "29 source-train + 2 source-validation subjects",
+        "fold": FOLD,
+        "source_train_trials": len(train),
+        "source_validation_trials": len(validation_entries),
+        "target_trials": len(target),
+        "deep_validation": str(validation_path),
+        "validated_at": utc_now(),
+    }
 
 
 def validate_native_sources(
     config: ExperimentConfig,
     cache_parent: Path | None = None,
 ) -> dict[str, Any]:
-    audit = validate_fixed_cache(config, cache_parent)
+    audit = (
+        _validate_deap_cache(config, cache_parent)
+        if config.dataset == "deap"
+        else validate_fixed_cache(config, cache_parent)
+    )
     cache_root = Path(audit["cache_root"])
     environment = read_json(cache_root / "environment.json")
     ica_cache_root = Path(str(environment["ica_cache_root"])).resolve()
@@ -179,7 +311,7 @@ def validate_native_sources(
     cache_manifest = read_json(ica_cache_root / "cache_manifest.json")
     if str(cache_manifest.get("cleaning_signature")) != cleaning_signature:
         raise ValueError("ICA-cleaned cache signature does not match the fixed feature cache")
-    source, target = _fold_entries(cache_root)
+    source, target = _fold_entries(cache_root, config)
     for entry in source + target:
         cleaned = ica_cache_root / "trials" / f"{entry['trial_id']}.npz"
         if not cleaned.is_file():
@@ -199,6 +331,9 @@ def validate_native_sources(
 def protocol_payload(config: ExperimentConfig, audit: dict[str, Any]) -> dict[str, Any]:
     settings = experiment_settings(config)
     bands = config.raw["signal"]["bands_hz"]
+    channels = int(config.raw["dataset"]["channels"])
+    subjects = int(config.raw["dataset"]["subjects"])
+    feature_dim = _feature_dim(config)
     grid = native_frequency_grid(
         float(config.raw["signal"]["target_rate"]),
         float(config.raw["signal"]["window_seconds"]),
@@ -210,10 +345,17 @@ def protocol_payload(config: ExperimentConfig, audit: dict[str, Any]) -> dict[st
         "dataset": config.dataset,
         "seed": FIXED_SEED,
         "fold": FOLD,
-        "outer_protocol": "fold-1 LOSO: all 14 non-target subjects train / subject 1 target-monitored",
+        "outer_protocol": (
+            f"fold-1 LOSO: all {subjects - 1} non-target subjects train / "
+            "subject 1 target-monitored"
+        ),
         "window_seconds": float(config.raw["signal"]["window_seconds"]),
         "hop_seconds": float(config.raw["signal"]["hop_seconds"]),
-        "spectral_estimator": "Hann modified periodogram; nfft=nperseg=200; no zero padding",
+        "spectral_estimator": (
+            "Hann modified periodogram; "
+            f"nfft=nperseg={int(round(float(config.raw['signal']['target_rate']) * float(config.raw['signal']['window_seconds'])))}; "
+            "no zero padding"
+        ),
         "native_frequencies_hz": {
             name: values.astype(float).tolist()
             for name, values in zip(bands, grid, strict=True)
@@ -225,8 +367,14 @@ def protocol_payload(config: ExperimentConfig, audit: dict[str, Any]) -> dict[st
         },
         "fisher_rao_embedding": "p -> 2*sqrt(p); log-map norm equals 2*arccos(Bhattacharyya coefficient)",
         "pca_max_windows_per_trial": settings["pca_max_windows_per_trial"],
-        "representations": CONDITION_REPRESENTATIONS,
-        "input_shape": "[T,62,5] flattened to [T,310]",
+        "reference_fit_scope": settings["reference_scope"],
+        "representations": {
+            condition: CONDITION_REPRESENTATIONS[condition]
+            for condition in _expected_conditions(config)
+        },
+        "input_shape": (
+            f"[T,{channels},{len(bands)}] flattened to [T,{feature_dim}]"
+        ),
         "source_zscore": True,
         "architecture": settings["architecture"],
         "training": config.raw["training"],
@@ -249,8 +397,8 @@ def lock_experiment(config: ExperimentConfig, run_root: Path, cache_parent: Path
         "dataset": config.dataset,
         "fold": FOLD,
         "protocol_hash": _json_hash(protocol),
-        "max_epochs": 200,
-        "target_monitor_interval": 10,
+        "max_epochs": int(protocol["max_epochs"]),
+        "target_monitor_interval": int(protocol["target_monitor_interval"]),
         "target_metrics_affect_training": False,
         "checkpoint_selection": "fixed_final_epoch_only",
         "locked_at": utc_now(),
@@ -495,14 +643,22 @@ def _fit_pca_state(
     return {"means": means, "components": components, "explained_variance_ratio": ratios}
 
 
-def _valid_compact_trial(path: Path, entry: dict[str, Any]) -> bool:
+def _valid_compact_trial(
+    path: Path,
+    entry: dict[str, Any],
+    representation_keys: dict[str, str],
+    feature_dim: int,
+) -> bool:
     if not path.is_file():
         return False
     try:
         with np.load(path, allow_pickle=False) as archive:
             return (
-                all(key in archive for key in REPRESENTATION_KEYS.values())
-                and all(archive[key].ndim == 2 and archive[key].shape[1] == 310 for key in REPRESENTATION_KEYS.values())
+                all(key in archive for key in representation_keys.values())
+                and all(
+                    archive[key].ndim == 2 and archive[key].shape[1] == feature_dim
+                    for key in representation_keys.values()
+                )
                 and int(archive["source_index"].item()) == int(entry["source_index"])
             )
     except (KeyError, OSError, ValueError):
@@ -518,40 +674,66 @@ def prepare_native_feature_cache(
     protocol = protocol_payload(config, audit)
     protocol_hash = _json_hash(protocol)
     cache_root = _feature_cache_root(run_root, config.dataset, protocol_hash)
+    feature_dim = _feature_dim(config)
+    representation_keys = _active_representation_keys(config)
     manifest_path = cache_root / "manifest.json"
     if manifest_path.is_file():
         manifest = read_json(manifest_path)
         if manifest.get("status") == "complete" and manifest.get("protocol_hash") == protocol_hash:
             return manifest
 
-    source_entries, target_entries = _fold_entries(Path(audit["cache_root"]))
-    references = _fit_reference_state(config, audit, source_entries, cache_root, protocol_hash)
-    pca = _fit_pca_state(config, audit, source_entries, references, cache_root, protocol_hash)
+    train_entries, validation_entries, target_entries = _fold_groups(
+        Path(audit["cache_root"]), config
+    )
+    source_entries = train_entries + validation_entries
+    reference_entries = (
+        train_entries
+        if experiment_settings(config)["reference_scope"] == "source_train"
+        else source_entries
+    )
+    references = _fit_reference_state(config, audit, reference_entries, cache_root, protocol_hash)
+    pca = (
+        _fit_pca_state(config, audit, reference_entries, references, cache_root, protocol_hash)
+        if "native_fisher_rao_pca_zscore" in representation_keys
+        else None
+    )
     entries = sorted(source_entries + target_entries, key=lambda item: int(item["source_index"]))
     trial_root = cache_root / "trials"
     started = time.perf_counter()
     completed = 0
     for index, entry in enumerate(entries, 1):
         output = trial_root / f"{entry['trial_id']}.npz"
-        if _valid_compact_trial(output, entry):
+        if _valid_compact_trial(output, entry, representation_keys, feature_dim):
             completed += 1
             continue
         distributions, frequencies = _native_distributions(config, audit, entry)
-        sqrt_jsd = transform_native_sqrt_jsd(distributions, references["arithmetic"])
-        fisher_rao = transform_native_fisher_rao_pca(
-            distributions, references["fisher_rao"], pca["means"], pca["components"]
-        )
-        wasserstein1 = transform_native_wasserstein1(
-            distributions, references["arithmetic"], frequencies
-        )
         expected_time = int(distributions[0].shape[0])
-        if any(value.shape != (expected_time, 310) for value in (sqrt_jsd, fisher_rao, wasserstein1)):
-            raise ValueError(f"Compact feature shape mismatch for {entry['trial_id']}")
+        features: dict[str, np.ndarray] = {}
+        if "native_sqrt_jsd_zscore" in representation_keys:
+            features["native_sqrt_jsd"] = transform_native_sqrt_jsd(
+                distributions, references["arithmetic"]
+            )
+        if "native_fisher_rao_pca_zscore" in representation_keys:
+            if pca is None:
+                raise RuntimeError("Fisher-Rao PCA state was not fitted")
+            features["native_fisher_rao_pca"] = transform_native_fisher_rao_pca(
+                distributions, references["fisher_rao"], pca["means"], pca["components"]
+            )
+        if "native_wasserstein1_zscore" in representation_keys:
+            features["native_wasserstein1"] = transform_native_wasserstein1(
+                distributions, references["arithmetic"], frequencies
+            )
+        if any(
+            value.shape != (expected_time, feature_dim)
+            for value in features.values()
+        ):
+            raise ValueError(
+                f"Compact feature shape mismatch for {entry['trial_id']}: "
+                f"{ {key: value.shape for key, value in features.items()} }"
+            )
         write_npz(
             output,
-            native_sqrt_jsd=sqrt_jsd.astype(np.float32),
-            native_fisher_rao_pca=fisher_rao.astype(np.float32),
-            native_wasserstein1=wasserstein1.astype(np.float32),
+            **{key: value.astype(np.float32) for key, value in features.items()},
             label=np.int64(entry["label"]),
             subject=np.int64(entry["subject"]),
             session=np.int64(entry["session"]),
@@ -577,11 +759,20 @@ def prepare_native_feature_cache(
         "source_trials": len(source_entries),
         "target_trials": len(target_entries),
         "completed_trials": completed,
-        "representations": REPRESENTATION_KEYS,
-        "feature_shape": "[T,310] = [T,62,5]",
+        "reference_source_subjects": sorted({int(entry["subject"]) for entry in reference_entries}),
+        "reference_source_trials": len(reference_entries),
+        "reference_fit_scope": experiment_settings(config)["reference_scope"],
+        "representations": representation_keys,
+        "feature_shape": (
+            f"[T,{feature_dim}] = [T,{int(config.raw['dataset']['channels'])},"
+            f"{len(config.raw['signal']['bands_hz'])}]"
+        ),
         "storage_dtype": "float32",
         "reference_state": str((cache_root / "reference_state.npz").resolve()),
-        "fisher_rao_pca_state": str((cache_root / "fisher_rao_pca_state.npz").resolve()),
+        "fisher_rao_pca_state": (
+            str((cache_root / "fisher_rao_pca_state.npz").resolve())
+            if pca is not None else None
+        ),
         "elapsed_seconds_last_transform_pass": time.perf_counter() - started,
         "completed_at": utc_now(),
     }
@@ -593,6 +784,7 @@ def _load_feature_samples(
     feature_cache: Path,
     entries: Sequence[dict[str, Any]],
     representation: str,
+    feature_dim: int,
 ) -> list[TrialSample]:
     if representation not in REPRESENTATION_KEYS:
         raise ValueError(f"Unknown native compact representation: {representation}")
@@ -602,7 +794,7 @@ def _load_feature_samples(
         path = feature_cache / "trials" / f"{entry['trial_id']}.npz"
         with np.load(path, allow_pickle=False) as archive:
             value = np.asarray(archive[key], dtype=np.float32)
-            if value.ndim != 2 or value.shape[1] != 310 or not np.isfinite(value).all():
+            if value.ndim != 2 or value.shape[1] != feature_dim or not np.isfinite(value).all():
                 raise ValueError(f"Invalid {key} feature in {path}: {value.shape}")
             if int(archive["source_index"].item()) != int(entry["source_index"]):
                 raise ValueError(f"Feature metadata mismatch in {path}")
@@ -624,20 +816,39 @@ def _prepare_bundle(
     protocol_hash: str,
     representation: str,
 ) -> dict[str, Any]:
-    source_entries, target_entries = _fold_entries(Path(audit["cache_root"]))
+    train_entries, validation_entries, target_entries = _fold_groups(
+        Path(audit["cache_root"]), config
+    )
     feature_cache = _feature_cache_root(run_root, config.dataset, protocol_hash)
-    source_samples = _load_feature_samples(feature_cache, source_entries, representation)
-    normalization = scaling_statistics(source_samples, True)
+    feature_dim = _feature_dim(config)
+    train_samples = _load_feature_samples(
+        feature_cache, train_entries, representation, feature_dim
+    )
+    validation_samples = _load_feature_samples(
+        feature_cache, validation_entries, representation, feature_dim
+    )
+    source_samples = train_samples + validation_samples
+    normalization_samples = (
+        train_samples
+        if experiment_settings(config)["reference_scope"] == "source_train"
+        else source_samples
+    )
+    normalization = scaling_statistics(normalization_samples, True)
     source_locked_at = utc_now()
     # The target compact cache was created only after source reference/PCA
     # fitting.  Arrays and labels enter the experiment only after the source
     # normalizer above is locked.
-    target_samples = _load_feature_samples(feature_cache, target_entries, representation)
+    target_samples = _load_feature_samples(
+        feature_cache, target_entries, representation, feature_dim
+    )
     return {
         "source_samples": source_samples,
         "target_samples": target_samples,
         "normalization": normalization,
-        "source_subjects": sorted({int(entry["subject"]) for entry in source_entries}),
+        "source_subjects": sorted({int(sample.subject) for sample in source_samples}),
+        "normalization_subjects": sorted({
+            int(sample.subject) for sample in normalization_samples
+        }),
         "source_locked_at": source_locked_at,
         "target_loaded_at": utc_now(),
         "feature_cache": str(feature_cache.resolve()),
@@ -648,6 +859,7 @@ def _model_config(config: ExperimentConfig) -> dict[str, Any]:
     architecture = experiment_settings(config)["architecture"]
     return {
         "name": "hierarchical_attention",
+        "channels": int(config.raw["dataset"]["channels"]),
         "d_model": int(architecture["d_model"]),
         "heads": int(architecture["heads"]),
         "layers": int(architecture["layers"]),
@@ -677,11 +889,12 @@ def declared_tasks(
     protocol_hash: str,
     conditions: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    selected = tuple(conditions or EXPECTED_CONDITIONS)
-    if set(selected) - set(EXPECTED_CONDITIONS):
+    expected_conditions = _expected_conditions(config)
+    selected = tuple(conditions or expected_conditions)
+    if set(selected) - set(expected_conditions):
         raise ValueError("Unknown condition filter")
     tasks = []
-    for condition in EXPECTED_CONDITIONS:
+    for condition in expected_conditions:
         if condition not in selected:
             continue
         identifier = task_identifier(config.dataset, condition)
@@ -721,12 +934,15 @@ def run_task(
     output = _task_output(run_root, task)
     output.mkdir(parents=True, exist_ok=True)
     training = _training_config(config, smoke_epochs)
+    source_subject_count = int(config.raw["dataset"]["subjects"]) - 1
     checkpoint_path = output / "final_epoch_model.pt"
     events = [
         {
             "event": "source_feature_state_and_normalization_locked",
             "at": bundle["source_locked_at"],
-            "source_subject_count": 14,
+            "source_subject_count": source_subject_count,
+            "normalization_subject_count": len(bundle["normalization_subjects"]),
+            "normalization_subjects": bundle["normalization_subjects"],
             "target_arrays_loaded": False,
         },
         {
@@ -809,22 +1025,25 @@ def run_task(
         "protocol_hash": task["protocol_hash"],
         "outer_protocol": "fold-1 LOSO",
         "formal_source_subjects": bundle["source_subjects"],
-        "formal_source_subject_count": 14,
+        "formal_source_subject_count": source_subject_count,
+        "source_state_fit_subjects": bundle["normalization_subjects"],
+        "source_state_fit_scope": experiment_settings(config)["reference_scope"],
         "target_subject": FOLD,
         "target_monitoring_during_training": True,
         "target_monitor_interval": int(training["target_monitor_interval"]),
         "target_metrics_affect_training": False,
         "early_stopping": False,
         "checkpoint_selection": "fixed_final_epoch_only",
-        "native_grid": True,
+        "native_grid": task["representation"] != "de_zscore",
         "feature_cache": bundle["feature_cache"],
         "events": events,
     })
-    reference_rule = (
-        "source_hellinger_barycenter_plus_unsupervised_tangent_pca"
-        if task["representation"] == "native_fisher_rao_pca_zscore"
-        else "source_pooled_arithmetic_probability_mean"
-    )
+    if task["representation"] == "native_fisher_rao_pca_zscore":
+        reference_rule = "source_hellinger_barycenter_plus_unsupervised_tangent_pca"
+    elif task["representation"] == "de_zscore":
+        reference_rule = "source_train_channel_band_zscore"
+    else:
+        reference_rule = "source_pooled_arithmetic_probability_mean"
     result = {
         "schema_version": SCHEMA_VERSION,
         "family": FAMILY,
@@ -841,10 +1060,14 @@ def run_task(
         "protocol_hash": task["protocol_hash"],
         "preprocessing_signature": audit["preprocessing_signature"],
         "cleaning_signature": audit["cleaning_signature"],
-        "native_nfft": audit["native_nfft"],
+        "native_nfft": (
+            None if task["representation"] == "de_zscore" else audit["native_nfft"]
+        ),
         "source_zscore": True,
         "reference_rule": reference_rule,
-        "formal_source_subject_count": 14,
+        "formal_source_subject_count": source_subject_count,
+        "source_state_fit_subject_count": len(bundle["normalization_subjects"]),
+        "source_state_fit_scope": experiment_settings(config)["reference_scope"],
         "max_epochs": int(training["locked_epochs"]),
         "target_monitor_interval": int(training["target_monitor_interval"]),
         "target_metrics_affect_training": False,
@@ -879,7 +1102,7 @@ def _load_or_merge_manifest(
         "schema_version": SCHEMA_VERSION,
         "family": FAMILY,
         "created_at": utc_now(),
-        "expected_both_dataset_tasks": 6,
+        "expected_tasks": 0,
         "protocols": {},
         "cache_audits": {},
         "tasks": {},
@@ -889,6 +1112,10 @@ def _load_or_merge_manifest(
         "protocol_hash": protocol_hash,
         "payload": protocol,
     }
+    manifest["expected_tasks"] = sum(
+        len(item["payload"]["representations"])
+        for item in manifest["protocols"].values()
+    )
     manifest["cache_audits"][audit["dataset"]] = audit
     for task in tasks:
         existing = manifest["tasks"].get(task["task_id"])
@@ -998,13 +1225,18 @@ def matrix_status(run_root: Path) -> dict[str, Any]:
         {"task_id": task["task_id"], "error": task.get("error")}
         for task in tasks if task.get("status") == "failed"
     ]
+    expected_tasks = int(manifest.get("expected_tasks", len(tasks)))
     payload = {
-        "status": "complete" if tasks and counts["complete"] == len(tasks) else "in_progress",
+        "status": (
+            "complete"
+            if tasks and len(tasks) == expected_tasks and counts["complete"] == expected_tasks
+            else "in_progress"
+        ),
         "family": FAMILY,
         "evidence_status": "exploratory_target_monitored",
         "run_root": str(run_root),
         "declared": len(tasks),
-        "expected_both_dataset_tasks": 6,
+        "expected_tasks": expected_tasks,
         **counts,
         "failed_tasks": failed,
         "updated_at": manifest.get("updated_at"),
@@ -1016,8 +1248,14 @@ def matrix_status(run_root: Path) -> dict[str, Any]:
 
 def summarize(run_root: Path, allow_partial: bool = False) -> dict[str, Any]:
     status = matrix_status(run_root)
-    if not allow_partial and (status.get("declared") != 6 or status.get("complete") != 6):
-        raise RuntimeError(f"Strict summary requires both datasets and all 6 tasks; status={status}")
+    expected_tasks = int(status.get("expected_tasks", status.get("declared", 0)))
+    if not allow_partial and (
+        status.get("declared") != expected_tasks
+        or status.get("complete") != expected_tasks
+    ):
+        raise RuntimeError(
+            f"Strict summary requires all {expected_tasks} protocol tasks; status={status}"
+        )
     manifest = read_json(run_root / "matrix_manifest.json")
     rows: list[dict[str, Any]] = []
     curve_rows: list[dict[str, Any]] = []
@@ -1074,7 +1312,7 @@ def summarize(run_root: Path, allow_partial: bool = False) -> dict[str, Any]:
     summary = {
         "schema_version": SCHEMA_VERSION,
         "family": FAMILY,
-        "status": "complete" if len(rows) == 6 else "partial",
+        "status": "complete" if len(rows) == expected_tasks else "partial",
         "evidence_status": "exploratory_target_monitored_not_unbiased_formal_evidence",
         "seed": FIXED_SEED,
         "fold": FOLD,

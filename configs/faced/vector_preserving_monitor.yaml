@@ -1,0 +1,124 @@
+experiment:
+  dataset: faced
+  feature: rd
+  model: hierarchical_attention
+paths:
+  data_root: ../Dataset
+  processed_root: ../Dataset/Processed/CMRD
+  run_root: runs/faced_vector_preserving_monitor_seed42
+dataset:
+  raw_dir: Ori/FACED/Processed_data
+  metadata_dir: Ori/FACED
+  label_target: emotion_9
+  channels: 30
+  recorded_channels: 32
+  subjects: 123
+  classes: 9
+signal:
+  original_rate: 250
+  target_rate: 250
+  broad_band_hz: [0.05, 47.0]
+  filter_order: 0
+  window_seconds: 1.0
+  hop_seconds: 1.0
+  bands_hz:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 14.0]
+    beta: [14.0, 30.0]
+    gamma: [30.0, 47.0]
+feature:
+  name: native_vector_preserving_rjsd_and_supervised_fisher
+  de_filter_order: 4
+  hist_bins_per_band: 0
+  spectral_nfft: 250
+  storage_dtype: float32
+split:
+  protocol: official_subject_10fold
+  folds: 10
+  seed: 42
+model:
+  d_model: 128
+  nhead: 4
+  layers: 3
+  feedforward: 512
+  dropout: 0.10
+  hidden: 128
+
+# This is an exploratory fold-01 recipe. Parameters are intentionally grouped
+# here so later source-only diagnostics can change them without editing code.
+training:
+  seeds: [42]
+  device: auto
+  deterministic: true
+  epochs: 100
+  batch_size: 64
+  gradient_accumulation_steps: 1
+  learning_rate: 0.001
+  minimum_learning_rate: 0.00001
+  warmup_fraction: 0.0
+  weight_decay: 0.01
+  label_smoothing: 0.0
+  class_balanced_loss: true
+  gradient_clip_norm: 1.0
+  precision: bfloat16
+  matmul_precision: high
+  num_workers: 0
+  persistent_workers: false
+  prefetch_factor: 1
+  pin_memory: true
+tuning:
+  seed: 42
+  require_selection: false
+  selection_file: ""
+  architectures: []
+  optimizations: []
+output:
+  save_checkpoints: true
+
+# Preserve the base FACED declaration used to validate and reuse native spectra.
+faced_native:
+  seed: 42
+  pca_max_windows_per_trial: 8
+  architecture:
+    d_model: 128
+    heads: 4
+    layers: 3
+    feedforward: 512
+    dropout: 0.15
+  conditions:
+    de_base:
+      representation: de
+    native_sqrt_jsd_base:
+      representation: native_sqrt_jsd
+    native_fisher_rao_base:
+      representation: native_fisher_rao_pca
+
+faced_relative:
+  base_cache_root: runs/faced_native_compact_base_seed42
+  seed: 42
+  # Retained for backward-compatible config parsing; the per-band declaration
+  # below is authoritative for this vector-preserving experiment.
+  supervised_components: 2
+  supervised_components_by_band:
+    delta: 3
+    theta: 4
+    alpha: 6
+    beta: 8
+    gamma: 8
+  lda_regularization: 0.001
+  feature_storage_dtype: float16
+  frequency_encoder_hidden: 16
+  monitor_interval: 10
+  monitor_epoch_zero: true
+  architecture:
+    d_model: 128
+    heads: 4
+    layers: 3
+    feedforward: 512
+    dropout: 0.10
+  conditions:
+    frequency_vector_rjsd_base:
+      representation: frequency_point_rjsd
+    fisher_rao_supervised_full_vector_base:
+      representation: fisher_rao_supervised_lda

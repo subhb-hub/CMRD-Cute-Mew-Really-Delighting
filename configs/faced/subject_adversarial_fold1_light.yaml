@@ -1,0 +1,46 @@
+experiment:
+  name: faced_subject_adversarial_fold1_light
+  evidence_label: exploratory_source_selected_light_ablation
+paths:
+  base_run_root: runs/faced_native_compact_base_seed42
+  run_root: runs/faced_subject_adversarial_fold1_light_seed42
+protocol:
+  fold: 1
+  seed: 42
+  development_subjects: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  conditions:
+    - B0_emotion_only
+    - B1_marginal_subject_grl
+    - B2_conditional_subject_grl
+    - B3_dual_conditional_grl
+  evaluation_protocols:
+    - conventional_subject_holdout
+    - subject_and_stimulus_holdout
+model:
+  channels: 30
+  classes: 9
+  d_model: 128
+  heads: 4
+  layers: 3
+  feedforward: 512
+  dropout: 0.15
+  subject_hidden: 128
+  subject_dim: 64
+training:
+  epochs: 15
+  batch_subjects: 8
+  batch_emotions: 8
+  learning_rate: 0.0003
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.01
+  label_smoothing: 0.05
+  gradient_clip_norm: 1.0
+  adversarial_warmup_epochs: 3
+  adversarial_max_weight: 0.1
+  positive_subject_weight: 0.2
+  precision: bfloat16
+  device: auto
+  deterministic: true
+  probe_c: 1.0
+  bootstrap_repeats: 2000
+

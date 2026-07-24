@@ -105,7 +105,7 @@ def _load_histogram(root: Path, entry: dict[str, Any]) -> np.ndarray:
 def _load_de_file(path: str) -> np.ndarray:
     with np.load(path, allow_pickle=False) as archive:
         value = np.asarray(archive["de"], dtype=np.float32)
-    if value.ndim != 3 or value.shape[1:] != (62, 5) or not np.isfinite(value).all():
+    if value.ndim != 3 or value.shape[2] != 5 or not np.isfinite(value).all():
         raise ValueError(f"Invalid DE feature in {path}: {value.shape}")
     value.setflags(write=False)
     return value
@@ -396,8 +396,9 @@ def build_model(
     input_dim: int,
     classes: int,
     max_length: int,
-    channels: int = 62,
+    channels: int | None = None,
 ) -> nn.Module:
+    channels = int(config.get("channels", channels if channels is not None else 62))
     name = str(config["name"])
     heads = int(config.get("heads", config.get("nhead", 4)))
     if name == "small_mlp":

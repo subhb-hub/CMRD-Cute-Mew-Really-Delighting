@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
+from scipy.linalg import eigh
 from scipy.signal import welch
 
 from .signal import window_starts
@@ -250,6 +251,42 @@ def transform_native_sqrt_jsd(
     return result
 
 
+def transform_native_frequency_point_rjsd(
+    distributions: Sequence[np.ndarray],
+    references: Sequence[np.ndarray],
+    epsilon: float = 1e-12,
+) -> np.ndarray:
+    """Return signed square-root JSD contributions at every native frequency.
+
+    The regular native sqrt-JSD transform sums the separable JSD contributions
+    over a complete band and therefore retains only one non-negative radius per
+    channel-band.  This transform keeps every frequency contribution and uses
+    ``sign(P_f - Q_f)`` to preserve the direction of the deviation from the
+    single source-only reference.  Squaring and summing the returned values
+    within a band exactly reconstructs JSD up to floating-point error.
+
+    Bands are concatenated in their declared order, producing
+    ``[T, C * sum(F_b)]``.
+    """
+    time, channels = _validate_native_inputs(distributions, references)
+    point_values: list[np.ndarray] = []
+    for distribution, reference in zip(distributions, references, strict=True):
+        p = normalize_histograms(distribution, epsilon)
+        q = normalize_histograms(reference, epsilon)
+        midpoint = 0.5 * (p + q[None])
+        contribution = 0.5 * p * (np.log(p) - np.log(midpoint))
+        contribution += 0.5 * q[None] * (np.log(q[None]) - np.log(midpoint))
+        direction = np.where(p >= q[None], 1.0, -1.0).astype(np.float32)
+        point_values.append(
+            direction * np.sqrt(np.maximum(contribution, 0.0)).astype(np.float32)
+        )
+    structured = np.concatenate(point_values, axis=-1)
+    result = structured.reshape(time, channels * structured.shape[-1]).astype(np.float32)
+    if not np.isfinite(result).all():
+        raise FloatingPointError("Frequency-point RJSD produced non-finite values")
+    return result
+
+
 def transform_native_wasserstein1(
     distributions: Sequence[np.ndarray],
     references: Sequence[np.ndarray],
@@ -344,4 +381,115 @@ def transform_native_fisher_rao_pca(
     result = np.stack(values, axis=-1).reshape(time, channels * len(values)).astype(np.float32)
     if not np.isfinite(result).all():
         raise FloatingPointError("Native Fisher-Rao PCA coordinate produced non-finite values")
+    return result
+
+
+def fit_balanced_multiclass_lda_from_moments(
+    class_counts: np.ndarray,
+    class_sums: np.ndarray,
+    class_crosses: np.ndarray,
+    components: int,
+    regularization: float = 1e-3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fit a deterministic, class-balanced regularized LDA projection.
+
+    Inputs are sufficient statistics for tangent vectors with shapes
+    ``counts=[K]``, ``sums=[K,C,F]`` and ``crosses=[K,C,F,F]``.  Every class is
+    weighted equally when constructing within- and between-class scatter, so
+    FACED's four neutral videos do not outweigh the three videos in each other
+    emotion.  The returned center is ``[C,F]``, axes are ``[C,F,D]``, and the
+    final array contains the per-channel fraction of positive generalized
+    eigenvalue mass captured by each retained component.
+    """
+    counts = np.asarray(class_counts, dtype=np.float64)
+    sums = np.asarray(class_sums, dtype=np.float64)
+    crosses = np.asarray(class_crosses, dtype=np.float64)
+    if counts.ndim != 1 or np.any(counts <= 0):
+        raise ValueError("Every supervised projection class requires positive support")
+    if sums.ndim != 3 or sums.shape[0] != counts.size:
+        raise ValueError(f"Expected sums=[K,C,F], got {sums.shape}")
+    expected_crosses = (counts.size, sums.shape[1], sums.shape[2], sums.shape[2])
+    if crosses.shape != expected_crosses:
+        raise ValueError(f"Expected crosses={expected_crosses}, got {crosses.shape}")
+    maximum = min(int(counts.size - 1), int(sums.shape[-1]))
+    if not 1 <= int(components) <= maximum:
+        raise ValueError(f"components must be in [1,{maximum}], got {components}")
+    if not np.isfinite(regularization) or regularization <= 0:
+        raise ValueError("regularization must be positive")
+
+    class_means = sums / counts[:, None, None]
+    center = class_means.mean(axis=0)
+    class_covariances = crosses / counts[:, None, None, None]
+    class_covariances -= np.einsum("kcf,kcg->kcfg", class_means, class_means)
+    within = class_covariances.mean(axis=0)
+    offsets = class_means - center[None]
+    between = np.einsum("kcf,kcg->cfg", offsets, offsets) / counts.size
+
+    channels, frequencies = center.shape
+    axes = np.empty((channels, frequencies, int(components)), dtype=np.float32)
+    captured = np.empty((channels, int(components)), dtype=np.float32)
+    identity = np.eye(frequencies, dtype=np.float64)
+    for channel in range(channels):
+        sw = 0.5 * (within[channel] + within[channel].T)
+        sb = 0.5 * (between[channel] + between[channel].T)
+        scale = max(float(np.trace(sw)) / frequencies, 1e-8)
+        eigenvalues, eigenvectors = eigh(
+            sb,
+            sw + float(regularization) * scale * identity,
+            check_finite=True,
+        )
+        order = np.argsort(eigenvalues)[::-1]
+        positive = np.maximum(eigenvalues[order], 0.0)
+        denominator = max(float(positive.sum()), 1e-12)
+        selected = eigenvectors[:, order[: int(components)]]
+        for component in range(selected.shape[1]):
+            pivot = int(np.argmax(np.abs(selected[:, component])))
+            if selected[pivot, component] < 0:
+                selected[:, component] *= -1.0
+        axes[channel] = selected.astype(np.float32)
+        captured[channel] = (positive[: int(components)] / denominator).astype(np.float32)
+    if not np.isfinite(center).all() or not np.isfinite(axes).all():
+        raise FloatingPointError("Supervised Fisher-Rao projection state is non-finite")
+    return center.astype(np.float32), axes, captured
+
+
+def transform_native_fisher_rao_supervised(
+    distributions: Sequence[np.ndarray],
+    references: Sequence[np.ndarray],
+    tangent_centers: Sequence[np.ndarray],
+    projection_axes: Sequence[np.ndarray],
+) -> np.ndarray:
+    """Project tangent vectors onto source-label-fitted, per-band LDA axes.
+
+    Bands may retain different component counts.  Their projected coordinates
+    are concatenated in physical-band order for every channel.
+    """
+    time, channels = _validate_native_inputs(distributions, references)
+    if not (
+        len(distributions) == len(tangent_centers) == len(projection_axes)
+    ):
+        raise ValueError("Every native band requires a center and supervised projection")
+    projected_bands: list[np.ndarray] = []
+    for band, (distribution, reference, center, axes) in enumerate(
+        zip(distributions, references, tangent_centers, projection_axes, strict=True)
+    ):
+        tangent = fisher_rao_log_map(distribution, reference)
+        center_value = np.asarray(center, dtype=np.float32)
+        axes_value = np.asarray(axes, dtype=np.float32)
+        if center_value.shape != reference.shape:
+            raise ValueError(f"Invalid supervised tangent center for band {band}")
+        if axes_value.ndim != 3 or axes_value.shape[:2] != reference.shape:
+            raise ValueError(f"Invalid supervised projection axes for band {band}: {axes_value.shape}")
+        projected_bands.append(
+            np.einsum(
+                "tcf,cfk->tck",
+                tangent - center_value[None],
+                axes_value,
+                dtype=np.float32,
+            )
+        )
+    structured = np.concatenate(projected_bands, axis=-1)
+    result = structured.reshape(time, channels * structured.shape[-1]).astype(np.float32)
+    if not np.isfinite(result).all():
+        raise FloatingPointError("Supervised Fisher-Rao features are non-finite")
     return result

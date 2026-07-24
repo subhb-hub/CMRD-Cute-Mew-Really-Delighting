@@ -177,6 +177,19 @@ class FixedProtocolTests(unittest.TestCase):
         self.assertEqual(info["de"]["misses"], 1)
         self.assertGreaterEqual(info["de"]["hits"], 1)
 
+    def test_de_loader_accepts_deap_32_channel_features(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary)
+            trial = cache / "trials" / "sub-01.npz"
+            trial.parent.mkdir(parents=True)
+            np.savez_compressed(trial, de=np.zeros((60, 32, 5), dtype=np.float32))
+            item = entry(1, "trials/sub-01.npz")
+            clear_feature_cache()
+            samples = load_representation_samples(
+                cache, [item], "de_raw", channels=32
+            )
+        self.assertEqual(samples[0].x.shape, (60, 160))
+
     def test_two_persistent_workers_preserve_old_batches(self) -> None:
         rng = np.random.default_rng(99)
         source = [

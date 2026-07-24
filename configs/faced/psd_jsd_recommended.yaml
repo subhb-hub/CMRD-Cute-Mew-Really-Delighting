@@ -1,0 +1,73 @@
+experiment:
+  name: faced_psd_jsd_recommended
+  evidence_label: source_only_inner_cv_model_selection
+
+paths:
+  spectra_root: runs/faced_native_compact_base_seed42/cache/native_spectra/aa535efcfb9084d7
+  run_root: runs/faced_psd_jsd_recommended_seed42
+
+protocol:
+  outer_fold: 1
+  seed: 42
+  inner_folds: 3
+  smoke_train_subjects: 8
+  smoke_development_subjects: 4
+  target_policy: locked_and_unread_during_all_config_selection
+
+feature:
+  name: frequency_resolved_sqrt_jsd_to_inner_train_mean_psd
+  epsilon: 1.0e-12
+  storage_dtype: float16
+  standardization: inner_train_only_per_channel_band_frequency
+
+sanity:
+  samples_per_class: 2
+  maximum_steps: 500
+  learning_rate: 0.001
+  target_accuracy: 0.99
+  target_loss: 0.05
+  dropout: 0.0
+  weight_decay: 0.0
+  label_smoothing: 0.0
+  gradient_clipping: disabled
+
+training:
+  seed: 42
+  device: auto
+  deterministic: true
+  epochs: 24
+  smoke_epochs: 16
+  batch_size: 32
+  evaluation_batch_size: 64
+  learning_rate: 0.0003
+  minimum_learning_rate: 0.000003
+  warmup_fraction: 0.10
+  weight_decay: 0.001
+  label_smoothing: 0.0
+  gradient_clip_norm: 1.0
+  precision: bfloat16
+  num_workers: 0
+  selection_gate:
+    minimum_train_margin: 0.05
+    minimum_dev_margin: 0.001
+    minimum_predicted_classes: 3
+
+candidates:
+  cnn_tiny_stable:
+    model: cnn_tiny
+    cnn_channels: [8, 16, 32]
+    d_model: 64
+    heads: 4
+    temporal_layers: 2
+    feedforward: 256
+    dropout: 0.05
+  native_band_tiny_stable:
+    model: native_band
+    frequency_hidden: 32
+    d_model: 64
+    heads: 4
+    channel_layers: 1
+    temporal_layers: 2
+    feedforward: 256
+    dropout: 0.05
+

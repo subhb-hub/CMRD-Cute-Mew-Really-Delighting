@@ -122,12 +122,29 @@ class HierarchicalChannelBandTransformer(nn.Module):
         valid_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         structured = self._structure_input(data, mask)
-        batch, time, _, _ = structured.shape
-
         # [B,T,C,F] -> [B,T,C,F,d], then learned pooling over F.
         band_tokens = self.value_embedding(structured.unsqueeze(-1))
         band_tokens = band_tokens + self.band_embedding[None, None, None, :, :]
         band_tokens = band_tokens + self.channel_embedding[None, None, :, None, :]
+        return self._forward_band_tokens(
+            band_tokens,
+            mask,
+            return_attention=return_attention,
+            valid_indices=valid_indices,
+        )
+
+    def _forward_band_tokens(
+        self,
+        band_tokens: torch.Tensor,
+        mask: torch.Tensor,
+        *,
+        return_attention: bool = False,
+        valid_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        expected = (*mask.shape, self.channels, self.feature_slots, self.d_model)
+        if tuple(band_tokens.shape) != expected:
+            raise ValueError(f"Expected embedded band tokens {expected}, got {tuple(band_tokens.shape)}")
+        batch, time = mask.shape
         band_tokens = self.band_dropout(self.band_norm(band_tokens))
         band_weights = torch.softmax(self.band_score(band_tokens).squeeze(-1), dim=-1)
         channel_tokens = torch.sum(band_tokens * band_weights.unsqueeze(-1), dim=-2)
@@ -174,3 +191,175 @@ class HierarchicalChannelBandTransformer(nn.Module):
             "band": band_weights,
             "channel": channel_weights,
         }
+
+
+class VectorBandHierarchicalChannelTransformer(nn.Module):
+    """Preserve each physical band's vector before hierarchical pooling.
+
+    The scalar HCBT embeds every feature slot independently and immediately
+    pools those slots.  Native frequency-point RJSD and supervised tangent
+    coordinates carry information in the pattern *within* a physical band.
+    This adapter therefore maps each complete, possibly variable-length band
+    vector to one ``d_model`` token before applying the established
+    band/channel/time hierarchy.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        channels: int,
+        band_sizes: tuple[int, ...] | list[int],
+        classes: int,
+        max_length: int,
+        d_model: int = 64,
+        channel_heads: int = 4,
+        temporal_heads: int = 4,
+        temporal_layers: int = 3,
+        feedforward: int = 256,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
+        sizes = tuple(map(int, band_sizes))
+        if not sizes or any(size < 1 for size in sizes):
+            raise ValueError("Every vector band requires at least one component")
+        expected = int(channels) * sum(sizes)
+        if int(input_dim) != expected:
+            raise ValueError(f"input_dim={input_dim}, expected channels*sum(band_sizes)={expected}")
+        self.input_dim = int(input_dim)
+        self.channels = int(channels)
+        self.band_sizes = sizes
+        self.band_encoders = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(size, int(d_model)),
+                nn.GELU(),
+            )
+            for size in sizes
+        ])
+        self.backbone = HierarchicalChannelBandTransformer(
+            input_dim=int(channels) * len(sizes),
+            channels=int(channels),
+            classes=int(classes),
+            max_length=int(max_length),
+            d_model=int(d_model),
+            channel_heads=int(channel_heads),
+            temporal_heads=int(temporal_heads),
+            temporal_layers=int(temporal_layers),
+            feedforward=int(feedforward),
+            dropout=float(dropout),
+        )
+
+    def forward(
+        self,
+        data: torch.Tensor,
+        mask: torch.Tensor,
+        return_attention: bool = False,
+        valid_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if data.ndim != 3 or data.shape[-1] != self.input_dim:
+            raise ValueError(f"Expected vector-band data [B,T,{self.input_dim}], got {data.shape}")
+        structured = data.reshape(*data.shape[:2], self.channels, sum(self.band_sizes))
+        tokens = [
+            encoder(value)
+            for encoder, value in zip(
+                self.band_encoders,
+                torch.split(structured, self.band_sizes, dim=-1),
+                strict=True,
+            )
+        ]
+        band_tokens = torch.stack(tokens, dim=-2)
+        band_tokens = band_tokens + self.backbone.band_embedding[None, None, None, :, :]
+        band_tokens = band_tokens + self.backbone.channel_embedding[None, None, :, None, :]
+        return self.backbone._forward_band_tokens(
+            band_tokens,
+            mask,
+            return_attention=return_attention,
+            valid_indices=valid_indices,
+        )
+
+
+class FrequencyPointChannelBandTransformer(nn.Module):
+    """Encode native frequency-point features before the regular HCBT.
+
+    A direct HCBT over all 46 FACED native frequencies would expand every
+    scalar to ``d_model`` and use roughly nine times the band-token activation
+    memory of the five-band model.  This adapter instead learns a small
+    frequency encoder independently inside each physical band, yielding one
+    scalar token per channel-band before applying the unchanged hierarchical
+    channel/band/time backbone.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        channels: int,
+        band_sizes: tuple[int, ...] | list[int],
+        classes: int,
+        max_length: int,
+        d_model: int = 64,
+        channel_heads: int = 4,
+        temporal_heads: int = 4,
+        temporal_layers: int = 3,
+        feedforward: int = 256,
+        dropout: float = 0.2,
+        frequency_hidden: int = 16,
+    ) -> None:
+        super().__init__()
+        sizes = tuple(map(int, band_sizes))
+        if not sizes or any(size < 2 for size in sizes):
+            raise ValueError("Every native frequency band requires at least two points")
+        expected = int(channels) * sum(sizes)
+        if int(input_dim) != expected:
+            raise ValueError(f"input_dim={input_dim}, expected channels*sum(band_sizes)={expected}")
+        if int(frequency_hidden) < 1:
+            raise ValueError("frequency_hidden must be positive")
+        self.input_dim = int(input_dim)
+        self.channels = int(channels)
+        self.band_sizes = sizes
+        self.frequency_encoders = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(size),
+                nn.Linear(size, int(frequency_hidden)),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(int(frequency_hidden), 1),
+            )
+            for size in sizes
+        ])
+        self.backbone = HierarchicalChannelBandTransformer(
+            input_dim=int(channels) * len(sizes),
+            channels=int(channels),
+            classes=int(classes),
+            max_length=int(max_length),
+            d_model=int(d_model),
+            channel_heads=int(channel_heads),
+            temporal_heads=int(temporal_heads),
+            temporal_layers=int(temporal_layers),
+            feedforward=int(feedforward),
+            dropout=float(dropout),
+        )
+
+    def forward(
+        self,
+        data: torch.Tensor,
+        mask: torch.Tensor,
+        return_attention: bool = False,
+        valid_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if data.ndim != 3 or data.shape[-1] != self.input_dim:
+            raise ValueError(f"Expected frequency-point data [B,T,{self.input_dim}], got {data.shape}")
+        structured = data.reshape(*data.shape[:2], self.channels, sum(self.band_sizes))
+        encoded = [
+            encoder(value).squeeze(-1)
+            for encoder, value in zip(
+                self.frequency_encoders,
+                torch.split(structured, self.band_sizes, dim=-1),
+                strict=True,
+            )
+        ]
+        compact = torch.stack(encoded, dim=-1).reshape(*data.shape[:2], -1)
+        return self.backbone(
+            compact,
+            mask,
+            return_attention=return_attention,
+            valid_indices=valid_indices,
+        )
